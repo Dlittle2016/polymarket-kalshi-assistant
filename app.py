@@ -4,7 +4,7 @@ from difflib import SequenceMatcher
 
 st.set_page_config(page_title='Polymarket → Kalshi Assistant', page_icon='📊', layout='wide')
 st.title('Polymarket → Kalshi Trading Assistant')
-st.caption('v2 · Read-only research · Approval mode · Simulated bankroll $55')
+st.caption('v3 · Read-only research · Approval mode · Simulated bankroll $55')
 BASE='https://api.elections.kalshi.com/trade-api/v2'
 POLY='https://data-api.polymarket.com'
 
@@ -23,17 +23,29 @@ def fetch_markets(max_pages=10):
     return rows
 
 def norm(s): return re.sub(r'[^a-z0-9 ]',' ',' '.join((s or '').lower().split()))
+def tokens(s): return set(norm(s).split())
 def score(a,b):
     aa,bb=norm(a),norm(b)
     if not aa or not bb:return 0.0
     seq=SequenceMatcher(None,aa,bb).ratio()
-    x,y=set(aa.split()),set(bb.split())
+    x,y=tokens(aa),tokens(bb)
     jac=len(x&y)/max(1,len(x|y))
     return round(max(seq,jac),3)
 def price(v):
     if v is None:return '—'
     try:return f'{float(v):.0f}¢'
     except:return str(v)
+
+# Search concepts are expanded deliberately; no substring matching against tickers.
+def search_terms(raw):
+    q=norm(raw)
+    aliases={
+        'fed':['federal reserve','fomc','interest rate','fed funds','rate decision'],
+        'federal reserve':['federal reserve','fomc','interest rate','fed funds','rate decision'],
+        'rates':['interest rate','fed funds','fomc','rate decision'],
+    }
+    if q in aliases: return aliases[q]
+    return [q]
 
 with st.sidebar:
     st.header('Bankroll & safeguards')
@@ -60,32 +72,44 @@ with trader:
             except Exception as e:st.error(f'Polymarket request failed: {e}')
 with matcher:
     st.subheader('Search open Kalshi markets')
-    keyword=st.text_input('Keyword',placeholder='Federal Reserve')
-    reference=st.text_input('Polymarket market title (optional; better matching)')
+    keyword=st.text_input('Keyword',placeholder='Fed, Federal Reserve, inflation, or interest rates')
+    reference=st.text_input('Polymarket market title (optional; improves matching)')
     if st.button('Search open markets',type='primary'):
         if not keyword.strip() and not reference.strip():st.warning('Enter a keyword or market title.')
         else:
             try:
                 with st.spinner('Retrieving open Kalshi markets…'):
                     markets=fetch_markets(pages)
-                query=reference.strip() or keyword.strip()
-                terms=[t for t in norm(keyword or reference).split() if len(t)>2]
+                raw_query=reference.strip() or keyword.strip()
+                concepts=search_terms(keyword.strip() or reference.strip())
                 matches=[]
                 for m in markets:
-                    title=m.get('title',''); sub=m.get('subtitle',''); ticker=m.get('ticker','')
-                    hay=norm(title+' '+sub+' '+ticker)
-                    if terms and not any(t in hay for t in terms):continue
-                    s=score(query,title+' '+sub)
+                    title=m.get('title','') or ''; sub=m.get('subtitle','') or ''
+                    searchable=norm(title+' '+sub)
+                    # Match complete words/phrases only. Tickers are intentionally excluded.
+                    if not any(norm(term) in searchable for term in concepts): continue
+                    s=score(raw_query,title+' '+sub)
                     matches.append((s,m))
                 matches.sort(key=lambda x:x[0],reverse=True)
-                st.write(f'Fetched **{len(markets):,}** open markets across up to {pages} pages. Found **{len(matches):,}** keyword matches.')
-                if not matches:st.info('No matches in the retrieved pages. Try broader terms such as “Fed”, “rates”, “inflation”, or “interest”.')
+                st.write(f'Fetched **{len(markets):,}** open markets across up to {pages} pages. Found **{len(matches):,}** relevant text matches.')
+                if not matches:
+                    st.info('No relevant matches in the pages retrieved. Try “Federal Reserve”, “FOMC”, “interest rate”, or increase Market catalog depth.')
                 else:
-                    out=[]
-                    for s,m in matches[:50]:
-                        out.append({'Similarity (screening only)':s,'Market':m.get('title'),'Subtitle':m.get('subtitle'),'Ticker':m.get('ticker'),'YES ask':price(m.get('yes_ask')),'NO ask':price(m.get('no_ask')),'Close time':m.get('close_time'),'Rules':m.get('rules_primary','')})
-                    st.dataframe(out,use_container_width=True,hide_index=True)
-                    st.warning('Similarity is not proof of equivalent contracts. Open the market and verify the exact resolution source, wording, cutoff, timezone, and settlement rules.')
+                    for idx,(s,m) in enumerate(matches[:40],1):
+                        with st.container(border=True):
+                            left,right=st.columns([5,1])
+                            with left:
+                                st.markdown(f'**{idx}. {m.get("title") or "Untitled market"}**')
+                                if m.get('subtitle'): st.caption(m.get('subtitle'))
+                                st.caption(f'Ticker: `{m.get("ticker", "—")}`  ·  Similarity screen: {s:.0%}')
+                            with right:
+                                st.metric('YES ask',price(m.get('yes_ask')))
+                                st.metric('NO ask',price(m.get('no_ask')))
+                            if m.get('close_time'): st.caption(f'Close: {m.get("close_time")}')
+                            rules=m.get('rules_primary') or ''
+                            if rules:
+                                with st.expander('Resolution rules'): st.write(rules)
+                    st.warning('These are text matches, not verified equivalent contracts. Confirm exact event wording, resolution source, cutoff, timezone, and settlement rules before considering a trade.')
             except requests.HTTPError as e:st.error(f'Kalshi API HTTP error: {e}')
             except Exception as e:st.error(f'Market search failed: {type(e).__name__}: {e}')
 with calc:
