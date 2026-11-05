@@ -4,9 +4,9 @@ import requests
 import re
 from difflib import SequenceMatcher
 
-# --------------------------------------------------
-# APP CONFIGURATION
-# --------------------------------------------------
+# ==================================================
+# CONFIGURATION
+# ==================================================
 
 st.set_page_config(
     page_title="Polymarket → Kalshi Assistant",
@@ -15,12 +15,12 @@ st.set_page_config(
 )
 
 st.title("Polymarket → Kalshi Trading Assistant")
+
 st.caption(
-    "v4 · Read-only research · Approval mode · "
-    "Simulated bankroll $55"
+    "v5 · Economic market research · Read-only · "
+    "Manual approval · Simulated bankroll $55"
 )
 
-# Use the public Kalshi market-data API.
 BASE = "https://api.elections.kalshi.com/trade-api/v2"
 POLY = "https://data-api.polymarket.com"
 
@@ -30,9 +30,161 @@ HEADERS = {
 }
 
 
-# --------------------------------------------------
-# KALSHI EVENT AND MARKET RETRIEVAL
-# --------------------------------------------------
+# ==================================================
+# ECONOMIC MARKET CATEGORIES
+# ==================================================
+
+ECONOMIC_TOPICS = {
+
+    "Federal Reserve": [
+        "federal reserve",
+        "fomc",
+        "fed funds",
+        "federal funds rate",
+        "interest rate",
+        "rate decision",
+        "rate cut",
+        "rate hike",
+        "rate increase",
+        "rate reduction",
+        "monetary policy",
+        "fed chair",
+        "fed meeting"
+    ],
+
+    "Inflation": [
+        "inflation",
+        "consumer price index",
+        "cpi",
+        "core cpi",
+        "personal consumption expenditures",
+        "pce",
+        "core pce",
+        "producer price index",
+        "ppi",
+        "price index"
+    ],
+
+    "Employment": [
+        "unemployment",
+        "unemployment rate",
+        "nonfarm payrolls",
+        "non farm payrolls",
+        "jobs report",
+        "jobless claims",
+        "initial claims",
+        "employment",
+        "labor market",
+        "labor force",
+        "payrolls",
+        "job creation"
+    ],
+
+    "Economic Growth": [
+        "gross domestic product",
+        "gdp",
+        "economic growth",
+        "recession",
+        "economic contraction",
+        "economic expansion",
+        "real gdp"
+    ],
+
+    "Consumer Economy": [
+        "retail sales",
+        "consumer spending",
+        "consumer confidence",
+        "consumer sentiment",
+        "personal income",
+        "personal spending"
+    ],
+
+    "Housing": [
+        "housing starts",
+        "home sales",
+        "existing home sales",
+        "new home sales",
+        "home prices",
+        "house prices",
+        "housing market",
+        "building permits",
+        "mortgage rates"
+    ],
+
+    "Treasury & Bonds": [
+        "treasury yield",
+        "treasury yields",
+        "10 year yield",
+        "10-year yield",
+        "2 year yield",
+        "2-year yield",
+        "bond yield",
+        "treasury bonds",
+        "treasury rate"
+    ],
+
+    "Business & Manufacturing": [
+        "manufacturing",
+        "industrial production",
+        "pmi",
+        "ism",
+        "business activity",
+        "factory orders",
+        "durable goods"
+    ]
+}
+
+
+# ==================================================
+# TEXT HELPERS
+# ==================================================
+
+def norm(value):
+
+    value = str(value or "").lower()
+
+    value = re.sub(
+        r"[^a-z0-9 ]",
+        " ",
+        value
+    )
+
+    return " ".join(value.split())
+
+
+def phrase_matches(text, phrase):
+
+    text = " " + norm(text) + " "
+    phrase = " " + norm(phrase) + " "
+
+    return phrase in text
+
+
+def score(a, b):
+
+    aa = norm(a)
+    bb = norm(b)
+
+    if not aa or not bb:
+        return 0.0
+
+    sequence = SequenceMatcher(
+        None,
+        aa,
+        bb
+    ).ratio()
+
+    x = set(aa.split())
+    y = set(bb.split())
+
+    jaccard = len(x & y) / max(1, len(x | y))
+
+    return round(max(sequence, jaccard), 3)
+
+
+# ==================================================
+# MARKET DATA
+# ==================================================
 
 @st.cache_data(ttl=45, show_spinner=False)
 def fetch_markets(max_pages=10):
@@ -42,7 +194,7 @@ def fetch_markets(max_pages=10):
     seen_cursors = set()
     event_count = 0
 
-    for page in range(max_pages):
+    for _ in range(max_pages):
 
         params = {
             "status": "open",
@@ -61,9 +213,11 @@ def fetch_markets(max_pages=10):
         )
 
         response.raise_for_status()
+
         payload = response.json()
 
         events = payload.get("events", [])
+
         event_count += len(events)
 
         for event in events:
@@ -73,9 +227,7 @@ def fetch_markets(max_pages=10):
             category = event.get("category", "") or ""
             event_ticker = event.get("event_ticker", "") or ""
 
-            nested_markets = event.get("markets", [])
-
-            for market in nested_markets:
+            for market in event.get("markets", []):
 
                 item = dict(market)
 
@@ -96,102 +248,9 @@ def fetch_markets(max_pages=10):
     return markets, event_count
 
 
-# --------------------------------------------------
-# TEXT SEARCH AND MATCHING
-# --------------------------------------------------
-
-def norm(value):
-
-    value = str(value or "").lower()
-
-    value = re.sub(
-        r"[^a-z0-9 ]",
-        " ",
-        value
-    )
-
-    return " ".join(value.split())
-
-
-def tokens(value):
-    return set(norm(value).split())
-
-
-def score(a, b):
-
-    aa = norm(a)
-    bb = norm(b)
-
-    if not aa or not bb:
-        return 0.0
-
-    sequence_score = SequenceMatcher(
-        None,
-        aa,
-        bb
-    ).ratio()
-
-    x = tokens(aa)
-    y = tokens(bb)
-
-    jaccard_score = len(x & y) / max(1, len(x | y))
-
-    return round(
-        max(sequence_score, jaccard_score),
-        3
-    )
-
-
-def search_terms(raw):
-
-    query = norm(raw)
-
-    aliases = {
-        "fed": [
-            "federal reserve",
-            "fomc",
-            "federal funds rate",
-            "interest rate",
-            "fed funds",
-            "rate decision",
-            "fed rate",
-            "fed meeting"
-        ],
-
-        "federal reserve": [
-            "federal reserve",
-            "fomc",
-            "federal funds rate",
-            "interest rate",
-            "fed funds",
-            "rate decision"
-        ],
-
-        "rates": [
-            "interest rate",
-            "federal funds rate",
-            "fomc",
-            "rate decision"
-        ],
-
-        "interest rates": [
-            "interest rate",
-            "federal funds rate",
-            "fomc",
-            "fed funds"
-        ],
-
-        "inflation": [
-            "inflation",
-            "consumer price index",
-            "cpi",
-            "producer price index",
-            "ppi"
-        ]
-    }
-
-    return aliases.get(query, [query])
-
+# ==================================================
+# MARKET SEARCH
+# ==================================================
 
 def market_search_text(market):
 
@@ -204,15 +263,76 @@ def market_search_text(market):
         market.get("event_title", ""),
         market.get("event_subtitle", ""),
         market.get("event_category", ""),
-        market.get("event_ticker", "")
     ]
 
-    return norm(" ".join(str(x or "") for x in fields))
+    return " ".join(
+        str(field or "")
+        for field in fields
+    )
 
 
-# --------------------------------------------------
+def find_topics(text):
+
+    matched = []
+
+    for topic, phrases in ECONOMIC_TOPICS.items():
+
+        for phrase in phrases:
+
+            if phrase_matches(text, phrase):
+
+                matched.append(topic)
+                break
+
+    return matched
+
+
+def find_keyword_concepts(keyword):
+
+    query = norm(keyword)
+
+    # Direct category selection takes priority.
+    if query in [norm(x) for x in ECONOMIC_TOPICS]:
+
+        for topic in ECONOMIC_TOPICS:
+
+            if norm(topic) == query:
+                return ECONOMIC_TOPICS[topic]
+
+    aliases = {
+
+        "fed": "Federal Reserve",
+        "fomc": "Federal Reserve",
+        "rates": "Federal Reserve",
+        "interest rates": "Federal Reserve",
+
+        "cpi": "Inflation",
+        "ppi": "Inflation",
+        "pce": "Inflation",
+
+        "jobs": "Employment",
+        "jobs report": "Employment",
+        "payrolls": "Employment",
+
+        "gdp": "Economic Growth",
+        "recession": "Economic Growth",
+
+        "bonds": "Treasury & Bonds",
+        "treasuries": "Treasury & Bonds",
+
+        "housing": "Housing"
+    }
+
+    if query in aliases:
+
+        return ECONOMIC_TOPICS[aliases[query]]
+
+    return [query] if query else []
+
+
+# ==================================================
 # PRICE FORMATTING
-# --------------------------------------------------
+# ==================================================
 
 def price(value, dollars=False):
 
@@ -229,15 +349,16 @@ def price(value, dollars=False):
         return f"{number:.1f}¢"
 
     except (ValueError, TypeError):
+
         return str(value)
 
 
 def market_price(market, field):
 
-    # Prefer dollar-denominated fields when available.
     dollar_field = field + "_dollars"
 
     if market.get(dollar_field) is not None:
+
         return price(
             market.get(dollar_field),
             dollars=True
@@ -246,9 +367,9 @@ def market_price(market, field):
     return price(market.get(field))
 
 
-# --------------------------------------------------
-# SIDEBAR: BANKROLL AND SAFEGUARDS
-# --------------------------------------------------
+# ==================================================
+# SIDEBAR
+# ==================================================
 
 with st.sidebar:
 
@@ -280,30 +401,30 @@ with st.sidebar:
         "Market catalog depth",
         options=[2, 5, 10, 20],
         value=10,
-        help="Number of event pages to retrieve. Each page contains up to 200 events."
+        help="Number of event pages to retrieve. Each page requests up to 200 events."
     )
 
     st.caption(
-        "Read-only research. No account connection "
-        "and no orders are placed."
+        "No Kalshi account connection. "
+        "No automatic orders."
     )
 
 
-# --------------------------------------------------
-# MAIN TABS
-# --------------------------------------------------
+# ==================================================
+# TABS
+# ==================================================
 
 trader, matcher, calc, check = st.tabs([
     "Trader activity",
-    "Market matcher",
+    "Economic market matcher",
     "Payoff calculator",
     "Approval checklist"
 ])
 
 
-# --------------------------------------------------
+# ==================================================
 # TAB 1: POLYMARKET TRADER ACTIVITY
-# --------------------------------------------------
+# ==================================================
 
 with trader:
 
@@ -311,7 +432,7 @@ with trader:
 
     wallet = st.text_input(
         "Public wallet address",
-        placeholder="0x…"
+        placeholder="0x..."
     )
 
     count = st.selectbox(
@@ -336,8 +457,8 @@ with trader:
                         "user": wallet.strip(),
                         "limit": count
                     },
-                    timeout=20,
-                    headers=HEADERS
+                    headers=HEADERS,
+                    timeout=20
                 )
 
                 response.raise_for_status()
@@ -368,75 +489,108 @@ with trader:
                 )
 
 
-# --------------------------------------------------
-# TAB 2: KALSHI MARKET MATCHER
-# --------------------------------------------------
+# ==================================================
+# TAB 2: ECONOMIC MARKET MATCHER
+# ==================================================
 
 with matcher:
 
-    st.subheader("Search open Kalshi markets")
+    st.subheader("Search major economic markets")
 
     st.write(
-        "Search event names, market titles, descriptions, "
-        "categories, and resolution rules."
+        "Find markets covering monetary policy, inflation, "
+        "employment, GDP, consumer activity, housing, and bonds."
+    )
+
+    topic_options = [
+        "All major economic markets"
+    ] + list(ECONOMIC_TOPICS.keys())
+
+    selected_topic = st.selectbox(
+        "Economic category",
+        topic_options
     )
 
     keyword = st.text_input(
-        "Keyword",
-        placeholder="Fed, FOMC, inflation, interest rates"
+        "Optional keyword",
+        placeholder="Fed, CPI, unemployment, GDP, inflation..."
     )
 
     reference = st.text_input(
         "Polymarket market title (optional)",
-        placeholder="Paste the market title to improve matching"
+        placeholder="Paste a market title to improve matching"
     )
 
     search_button = st.button(
-        "Search open markets",
+        "Search economic markets",
         type="primary"
     )
 
     if search_button:
 
-        if not keyword.strip() and not reference.strip():
+        try:
 
-            st.warning("Enter a keyword or market title.")
+            with st.spinner(
+                "Retrieving Kalshi economic events and markets..."
+            ):
 
-        else:
+                markets, event_count = fetch_markets(pages)
 
-            try:
+            matches = []
 
-                with st.spinner(
-                    "Retrieving Kalshi events and their markets..."
-                ):
+            if selected_topic == "All major economic markets":
 
-                    markets, event_count = fetch_markets(pages)
+                allowed_topics = list(ECONOMIC_TOPICS.keys())
 
-                raw_query = (
-                    reference.strip()
-                    if reference.strip()
-                    else keyword.strip()
-                )
+            else:
 
-                concepts = search_terms(
-                    keyword.strip()
-                    if keyword.strip()
-                    else reference.strip()
-                )
+                allowed_topics = [selected_topic]
 
-                matches = []
+            # A keyword can narrow an all-market search.
+            keyword_concepts = find_keyword_concepts(keyword)
 
-                for market in markets:
+            if keyword.strip():
 
-                    searchable = market_search_text(market)
+                keyword_topics = find_topics(keyword)
 
-                    if not any(
-                        norm(term) in searchable
-                        for term in concepts
-                    ):
+                # If the keyword clearly identifies a topic,
+                # narrow the search to that topic.
+                if selected_topic == "All major economic markets" and keyword_topics:
+
+                    allowed_topics = keyword_topics
+
+            for market in markets:
+
+                searchable = market_search_text(market)
+
+                matched_topics = find_topics(searchable)
+
+                matched_topics = [
+                    topic
+                    for topic in matched_topics
+                    if topic in allowed_topics
+                ]
+
+                if not matched_topics:
+                    continue
+
+                # Optional keyword must also match the market.
+                if keyword.strip():
+
+                    keyword_match = any(
+                        phrase_matches(searchable, term)
+                        for term in keyword_concepts
+                    )
+
+                    if not keyword_match:
                         continue
 
-                    comparison_text = (
+                # Optional Polymarket title similarity.
+                reference_score = 0.0
+
+                if reference.strip():
+
+                    comparison = (
                         market.get("title", "")
                         + " "
                         + market.get("subtitle", "")
@@ -444,157 +598,205 @@ with matcher:
                         + market.get("event_title", "")
                     )
 
-                    similarity = score(
-                        raw_query,
-                        comparison_text
+                    reference_score = score(
+                        reference,
+                        comparison
                     )
 
-                    matches.append(
-                        (similarity, market)
-                    )
+                # Give upcoming, shorter-horizon market titles
+                # a useful relevance score only when a reference exists.
+                matches.append({
+                    "market": market,
+                    "topics": matched_topics,
+                    "score": reference_score
+                })
 
-                matches.sort(
-                    key=lambda item: item[0],
-                    reverse=True
+            # With no reference, prioritize markets matching
+            # more than one relevant economic phrase/topic.
+            matches.sort(
+                key=lambda item: (
+                    item["score"],
+                    len(item["topics"])
+                ),
+                reverse=True
+            )
+
+            st.write(
+                f"Retrieved **{event_count:,} events** "
+                f"containing **{len(markets):,} markets** "
+                f"across up to {pages} pages."
+            )
+
+            st.write(
+                f"Found **{len(matches):,} economic market matches**."
+            )
+
+            if not matches:
+
+                st.info(
+                    "No matching economic markets were found "
+                    "in the events retrieved. Try a different "
+                    "category or keyword, or increase catalog depth."
                 )
 
-                st.write(
-                    f"Retrieved **{event_count:,} events** "
-                    f"containing **{len(markets):,} nested markets** "
-                    f"across up to {pages} pages."
-                )
+            else:
 
-                st.write(
-                    f"Found **{len(matches):,} relevant text matches**."
-                )
+                # Category summary.
+                topic_counts = {}
 
-                if not matches:
+                for item in matches:
 
-                    st.info(
-                        "No matching markets were found in the "
-                        "events retrieved. Try Federal Reserve, "
-                        "FOMC, interest rate, or increase catalog depth."
+                    for topic in item["topics"]:
+
+                        topic_counts[topic] = (
+                            topic_counts.get(topic, 0) + 1
+                        )
+
+                st.markdown("#### Results by economic category")
+
+                summary_columns = st.columns(3)
+
+                for index, (topic, total) in enumerate(
+                    sorted(
+                        topic_counts.items(),
+                        key=lambda x: x[1],
+                        reverse=True
                     )
+                ):
 
-                    st.caption(
-                        "The search only covers the event pages retrieved. "
-                        "It does not guarantee that every open Kalshi "
-                        "market has been searched."
-                    )
+                    with summary_columns[index % 3]:
 
-                else:
+                        st.metric(
+                            topic,
+                            total
+                        )
 
-                    for index, (similarity, market) in enumerate(
-                        matches[:40],
-                        start=1
-                    ):
+                st.divider()
 
-                        with st.container(border=True):
+                st.markdown("#### Matching markets")
 
-                            st.markdown(
-                                f"**{index}. "
-                                f"{market.get('title') or 'Untitled market'}**"
-                            )
+                for index, item in enumerate(
+                    matches[:50],
+                    start=1
+                ):
 
-                            event_title = market.get(
-                                "event_title",
-                                ""
-                            )
+                    market = item["market"]
 
-                            if event_title:
+                    with st.container(border=True):
 
-                                st.caption(
-                                    f"Event: {event_title}"
-                                )
+                        st.markdown(
+                            f"**{index}. "
+                            f"{market.get('title') or 'Untitled market'}**"
+                        )
 
-                            subtitle = (
-                                market.get("subtitle")
-                                or market.get("yes_sub_title")
-                                or ""
-                            )
+                        event_title = market.get(
+                            "event_title",
+                            ""
+                        )
 
-                            if subtitle:
-
-                                st.caption(subtitle)
+                        if event_title:
 
                             st.caption(
-                                f"Ticker: `{market.get('ticker', '—')}` "
-                                f"· Similarity screen: {similarity:.0%}"
+                                f"Event: {event_title}"
                             )
 
-                            left, right = st.columns(2)
+                        st.caption(
+                            "Economic category: "
+                            + ", ".join(item["topics"])
+                        )
 
-                            with left:
+                        if market.get("subtitle"):
 
-                                st.metric(
-                                    "YES ask",
-                                    market_price(
-                                        market,
-                                        "yes_ask"
-                                    )
-                                )
-
-                            with right:
-
-                                st.metric(
-                                    "NO ask",
-                                    market_price(
-                                        market,
-                                        "no_ask"
-                                    )
-                                )
-
-                            close_time = market.get("close_time")
-
-                            if close_time:
-
-                                st.caption(
-                                    f"Close: {close_time}"
-                                )
-
-                            rules = market.get(
-                                "rules_primary",
-                                ""
+                            st.caption(
+                                market["subtitle"]
                             )
 
-                            if rules:
+                        st.caption(
+                            f"Ticker: `{market.get('ticker', '—')}`"
+                        )
 
-                                with st.expander(
-                                    "Resolution rules"
-                                ):
+                        left, right = st.columns(2)
 
-                                    st.write(rules)
+                        with left:
 
-                    st.warning(
-                        "These are text matches, not verified "
-                        "equivalent contracts. Confirm the exact event, "
-                        "threshold, deadline, timezone, resolution source, "
-                        "and settlement rules before considering a trade."
+                            st.metric(
+                                "YES ask",
+                                market_price(
+                                    market,
+                                    "yes_ask"
+                                )
+                            )
+
+                        with right:
+
+                            st.metric(
+                                "NO ask",
+                                market_price(
+                                    market,
+                                    "no_ask"
+                                )
+                            )
+
+                        if market.get("close_time"):
+
+                            st.caption(
+                                "Close: "
+                                + market["close_time"]
+                            )
+
+                        if market.get("rules_primary"):
+
+                            with st.expander(
+                                "Resolution rules"
+                            ):
+
+                                st.write(
+                                    market["rules_primary"]
+                                )
+
+                if len(matches) > 50:
+
+                    st.info(
+                        f"Showing the first 50 of "
+                        f"{len(matches)} matches."
                     )
 
-            except requests.HTTPError as error:
-
-                st.error(
-                    f"Kalshi API HTTP error: {error}"
+                st.warning(
+                    "These are text matches, not verified "
+                    "trading opportunities. Confirm exact event "
+                    "wording, resolution source, deadline, timezone, "
+                    "liquidity, order-book prices, fees, and settlement rules."
                 )
 
-            except requests.RequestException as error:
-
-                st.error(
-                    f"Network request failed: {error}"
+                st.caption(
+                    "Catalog coverage is limited to the event pages "
+                    "retrieved. A market not shown may still exist "
+                    "outside those pages."
                 )
 
-            except Exception as error:
+        except requests.HTTPError as error:
 
-                st.error(
-                    f"Market search failed: "
-                    f"{type(error).__name__}: {error}"
-                )
+            st.error(
+                f"Kalshi API HTTP error: {error}"
+            )
+
+        except requests.RequestException as error:
+
+            st.error(
+                f"Network request failed: {error}"
+            )
+
+        except Exception as error:
+
+            st.error(
+                f"Market search failed: "
+                f"{type(error).__name__}: {error}"
+            )
 
 
-# --------------------------------------------------
+# ==================================================
 # TAB 3: PAYOFF CALCULATOR
-# --------------------------------------------------
+# ==================================================
 
 with calc:
 
@@ -612,7 +814,7 @@ with calc:
     with b:
 
         ask = st.number_input(
-            "Executable ask (¢)",
+            "Selected side executable ask (¢)",
             min_value=1,
             max_value=99,
             value=45
@@ -629,14 +831,14 @@ with calc:
         )
 
     probability = st.slider(
-        "Your estimated probability of winning (%)",
+        "Your estimated probability of this side winning (%)",
         min_value=1,
         max_value=99,
         value=55
     )
 
     contracts = int(
-        stake / (ask / 100)
+        stake / (ask / 100 + fee / 100)
     )
 
     cost = contracts * ask / 100
@@ -644,8 +846,7 @@ with calc:
     fees = contracts * fee / 100
 
     net_if_correct = (
-        contracts * (1 - ask / 100)
-        - fees
+        contracts * (1 - ask / 100) - fees
     )
 
     net_if_wrong = cost + fees
@@ -684,45 +885,50 @@ with calc:
     )
 
     st.caption(
-        f"Estimated cost ${cost:.2f} plus fees ${fees:.2f}. "
+        f"Selected side: {side}. "
+        f"Estimated cost: ${cost:.2f}. "
+        f"Estimated fees: ${fees:.2f}. "
         f"Break-even probability: {ask + fee:.1f}%. "
-        "Your probability is an assumption, not derived from "
-        "Polymarket activity."
+        "Probability is your assumption, not a verified forecast."
     )
 
 
-# --------------------------------------------------
-# TAB 4: MANUAL APPROVAL CHECKLIST
-# --------------------------------------------------
+# ==================================================
+# TAB 4: APPROVAL CHECKLIST
+# ==================================================
 
 with check:
 
     st.subheader("Before manually approving a trade")
 
     st.markdown("""
-    - [ ] Same underlying event and settlement source
-    - [ ] Same deadline, timezone, threshold, and resolution wording
+    - [ ] Same underlying event on both platforms
+    - [ ] Same outcome and contract direction
+    - [ ] Same threshold and measurement period
+    - [ ] Same deadline and timezone
+    - [ ] Same resolution source and settlement rules
     - [ ] Polymarket trader position is recent and not exited
     - [ ] Kalshi executable ask rechecked immediately before trading
+    - [ ] Order-book liquidity is sufficient
     - [ ] Actual fees and slippage included
     - [ ] Stake is within the configured cap
     - [ ] Full stake loss is affordable
     """)
 
     st.error(
-        "This build is read-only. It does not authenticate "
+        "This application is read-only. It does not authenticate "
         "to Kalshi or submit orders."
     )
 
 
-# --------------------------------------------------
+# ==================================================
 # FOOTER
-# --------------------------------------------------
+# ==================================================
 
 st.divider()
 
 st.caption(
     "Public APIs can change or rate-limit requests. "
-    "Prices shown are snapshots, not guaranteed executable quotes. "
+    "Displayed prices are snapshots, not guaranteed executable quotes. "
     "This tool does not guarantee profitable trades."
 )
