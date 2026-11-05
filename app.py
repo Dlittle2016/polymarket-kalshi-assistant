@@ -934,4 +934,3 @@ st.caption(
     "This app is informational and does not provide guaranteed signals "
     "or execute trades."
 )
-rades.")
