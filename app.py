@@ -1,934 +1,299 @@
-
-import streamlit as st
-import requests
 import re
-from difflib import SequenceMatcher
+import requests
+import streamlit as st
+from datetime import datetime, timezone
 
-# ==================================================
-# CONFIGURATION
-# ==================================================
+st.set_page_config(page_title="Polymarket → Kalshi Assistant", page_icon="📊", layout="wide")
 
-st.set_page_config(
-    page_title="Polymarket → Kalshi Assistant",
-    page_icon="📊",
-    layout="wide"
-)
+KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+POLY_BASE = "https://data-api.polymarket.com"
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MarketResearchAssistant/6.0)"}
 
-st.title("Polymarket → Kalshi Trading Assistant")
-
-st.caption(
-    "v5 · Economic market research · Read-only · "
-    "Manual approval · Simulated bankroll $55"
-)
-
-BASE = "https://api.elections.kalshi.com/trade-api/v2"
-POLY = "https://data-api.polymarket.com"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json"
+TOPICS = {
+    "Federal Reserve": ["federal reserve", "fomc", "fed funds", "federal funds rate", "interest rate", "rate decision", "rate cut", "rate hike", "rate increase", "rate reduction", "monetary policy", "fed chair", "fed meeting"],
+    "Inflation": ["inflation", "cpi", "core cpi", "pce", "ppi", "price index"],
+    "Employment": ["unemployment", "nonfarm payrolls", "jobs report", "jobless claims", "employment", "labor market", "payrolls", "job creation"],
+    "Economic Growth": ["gdp", "economic growth", "recession", "contraction", "expansion"],
+    "Consumer Economy": ["retail sales", "consumer spending", "consumer confidence", "consumer sentiment", "personal income", "personal spending"],
+    "Housing": ["housing starts", "home sales", "home prices", "housing market", "building permits", "mortgage rates"],
+    "Treasury & Bonds": ["treasury yields", "10-year yield", "2-year yield", "bond yield", "treasury bonds", "treasury rate"],
+    "Business & Manufacturing": ["manufacturing", "industrial production", "pmi", "ism", "business activity", "factory orders", "durable goods"],
 }
 
 
-# ==================================================
-# ECONOMIC MARKET CATEGORIES
-# ==================================================
+def get_json(url, params=None, timeout=20):
+    response = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
-ECONOMIC_TOPICS = {
-
-    "Federal Reserve": [
-        "federal reserve",
-        "fomc",
-        "fed funds",
-        "federal funds rate",
-        "interest rate",
-        "rate decision",
-        "rate cut",
-        "rate hike",
-        "rate increase",
-        "rate reduction",
-        "monetary policy",
-        "fed chair",
-        "fed meeting"
-    ],
-
-    "Inflation": [
-        "inflation",
-        "consumer price index",
-        "cpi",
-        "core cpi",
-        "personal consumption expenditures",
-        "pce",
-        "core pce",
-        "producer price index",
-        "ppi",
-        "price index"
-    ],
-
-    "Employment": [
-        "unemployment",
-        "unemployment rate",
-        "nonfarm payrolls",
-        "non farm payrolls",
-        "jobs report",
-        "jobless claims",
-        "initial claims",
-        "employment",
-        "labor market",
-        "labor force",
-        "payrolls",
-        "job creation"
-    ],
-
-    "Economic Growth": [
-        "gross domestic product",
-        "gdp",
-        "economic growth",
-        "recession",
-        "economic contraction",
-        "economic expansion",
-        "real gdp"
-    ],
-
-    "Consumer Economy": [
-        "retail sales",
-        "consumer spending",
-        "consumer confidence",
-        "consumer sentiment",
-        "personal income",
-        "personal spending"
-    ],
-
-    "Housing": [
-        "housing starts",
-        "home sales",
-        "existing home sales",
-        "new home sales",
-        "home prices",
-        "house prices",
-        "housing market",
-        "building permits",
-        "mortgage rates"
-    ],
-
-    "Treasury & Bonds": [
-        "treasury yield",
-        "treasury yields",
-        "10 year yield",
-        "10-year yield",
-        "2 year yield",
-        "2-year yield",
-        "bond yield",
-        "treasury bonds",
-        "treasury rate"
-    ],
-
-    "Business & Manufacturing": [
-        "manufacturing",
-        "industrial production",
-        "pmi",
-        "ism",
-        "business activity",
-        "factory orders",
-        "durable goods"
-    ]
-}
-
-
-# ==================================================
-# TEXT HELPERS
-# ==================================================
 
 def norm(value):
-
-    value = str(value or "").lower()
-
-    value = re.sub(
-        r"[^a-z0-9 ]",
-        " ",
-        value
-    )
-
-    return " ".join(value.split())
+    return re.sub(r"\s+", " ", str(value or "").lower()).strip()
 
 
-def phrase_matches(text, phrase):
-
-    text = " " + norm(text) + " "
-    phrase = " " + norm(phrase) + " "
-
+def phrase_in(text, phrase):
+    text = " " + re.sub(r"[^a-z0-9]+", " ", norm(text)) + " "
+    phrase = " " + re.sub(r"[^a-z0-9]+", " ", norm(phrase)) + " "
     return phrase in text
 
 
-def score(a, b):
+def topics_for(text):
+    found = []
+    for topic, phrases in TOPICS.items():
+        if any(phrase_in(text, p) for p in phrases):
+            found.append(topic)
+    return found
 
-    aa = norm(a)
-    bb = norm(b)
-
-    if not aa or not bb:
-        return 0.0
-
-    sequence = SequenceMatcher(
-        None,
-        aa,
-        bb
-    ).ratio()
-
-    x = set(aa.split())
-    y = set(bb.split())
-
-    jaccard = len(x & y) / max(1, len(x | y))
-
-    return round(max(sequence, jaccard), 3)
-
-
-# ==================================================
-# MARKET DATA
-# ==================================================
 
 @st.cache_data(ttl=45, show_spinner=False)
-def fetch_markets(max_pages=10):
-
-    markets = []
-    cursor = None
-    seen_cursors = set()
-    event_count = 0
-
+def fetch_kalshi_events(max_pages=10):
+    all_events, cursor = [], None
     for _ in range(max_pages):
-
-        params = {
-            "status": "open",
-            "limit": 200,
-            "with_nested_markets": "true"
-        }
-
+        params = {"status": "open", "limit": 200, "with_nested_markets": "true"}
         if cursor:
             params["cursor"] = cursor
-
-        response = requests.get(
-            BASE + "/events",
-            params=params,
-            headers=HEADERS,
-            timeout=30
-        )
-
-        response.raise_for_status()
-
-        payload = response.json()
-
-        events = payload.get("events", [])
-
-        event_count += len(events)
-
-        for event in events:
-
-            event_title = event.get("title", "") or ""
-            event_subtitle = event.get("sub_title", "") or ""
-            category = event.get("category", "") or ""
-            event_ticker = event.get("event_ticker", "") or ""
-
-            for market in event.get("markets", []):
-
-                item = dict(market)
-
-                item["event_title"] = event_title
-                item["event_subtitle"] = event_subtitle
-                item["event_category"] = category
-                item["event_ticker"] = event_ticker
-
-                markets.append(item)
-
+        payload = get_json(f"{KALSHI_BASE}/events", params=params)
+        events = payload.get("events", []) or []
+        all_events.extend(events)
         cursor = payload.get("cursor")
-
-        if not cursor or cursor in seen_cursors:
+        if not cursor:
             break
-
-        seen_cursors.add(cursor)
-
-    return markets, event_count
+    return all_events
 
 
-# ==================================================
-# MARKET SEARCH
-# ==================================================
-
-def market_search_text(market):
-
-    fields = [
-        market.get("title", ""),
-        market.get("subtitle", ""),
-        market.get("yes_sub_title", ""),
-        market.get("no_sub_title", ""),
-        market.get("rules_primary", ""),
-        market.get("event_title", ""),
-        market.get("event_subtitle", ""),
-        market.get("event_category", ""),
-    ]
-
-    return " ".join(
-        str(field or "")
-        for field in fields
-    )
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_leaderboard(period, category, sort_by, limit):
+    params = {"time_period": period.lower(), "category": category.lower(), "sort_by": sort_by.upper(), "limit": int(limit)}
+    payload = get_json(f"{POLY_BASE}/v2/leaderboard", params=params)
+    rows = payload.get("data", [])
+    if isinstance(rows, dict):
+        rows = rows.get("leaderboard", rows.get("data", []))
+    return rows if isinstance(rows, list) else [], payload.get("pagination", {})
 
 
-def find_topics(text):
-
-    matched = []
-
-    for topic, phrases in ECONOMIC_TOPICS.items():
-
-        for phrase in phrases:
-
-            if phrase_matches(text, phrase):
-
-                matched.append(topic)
-                break
-
-    return matched
+@st.cache_data(ttl=90, show_spinner=False)
+def fetch_wallet_stats(wallet):
+    payload = get_json(f"{POLY_BASE}/v2/user-stats", params={"user": wallet})
+    return payload.get("data")
 
 
-def find_keyword_concepts(keyword):
-
-    query = norm(keyword)
-
-    # Direct category selection takes priority.
-    if query in [norm(x) for x in ECONOMIC_TOPICS]:
-
-        for topic in ECONOMIC_TOPICS:
-
-            if norm(topic) == query:
-                return ECONOMIC_TOPICS[topic]
-
-    aliases = {
-
-        "fed": "Federal Reserve",
-        "fomc": "Federal Reserve",
-        "rates": "Federal Reserve",
-        "interest rates": "Federal Reserve",
-
-        "cpi": "Inflation",
-        "ppi": "Inflation",
-        "pce": "Inflation",
-
-        "jobs": "Employment",
-        "jobs report": "Employment",
-        "payrolls": "Employment",
-
-        "gdp": "Economic Growth",
-        "recession": "Economic Growth",
-
-        "bonds": "Treasury & Bonds",
-        "treasuries": "Treasury & Bonds",
-
-        "housing": "Housing"
-    }
-
-    if query in aliases:
-
-        return ECONOMIC_TOPICS[aliases[query]]
-
-    return [query] if query else []
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_wallet_positions(wallet, status, limit=100):
+    payload = get_json(f"{POLY_BASE}/v2/positions", params={"user": wallet, "status": status, "limit": limit, "sort_by": "REALIZED_PNL" if status == "CLOSED" else "CURRENT_VALUE", "sort_direction": "DESC"})
+    return payload.get("data", [])
 
 
-# ==================================================
-# PRICE FORMATTING
-# ==================================================
-
-def price(value, dollars=False):
-
-    if value is None or value == "":
+def money(value):
+    try:
+        return f"${float(value):,.2f}"
+    except (TypeError, ValueError):
         return "—"
 
-    try:
 
-        number = float(value)
-
-        if dollars:
-            number *= 100
-
-        return f"{number:.1f}¢"
-
-    except (ValueError, TypeError):
-
-        return str(value)
+def wallet_of(row):
+    return row.get("user_id") or row.get("proxy_wallet") or row.get("proxyWallet") or row.get("address") or ""
 
 
-def market_price(market, field):
-
-    dollar_field = field + "_dollars"
-
-    if market.get(dollar_field) is not None:
-
-        return price(
-            market.get(dollar_field),
-            dollars=True
-        )
-
-    return price(market.get(field))
+def display_leader(row):
+    return row.get("user_name") or row.get("username") or row.get("name") or (wallet_of(row)[:10] + "…")
 
 
-# ==================================================
-# SIDEBAR
-# ==================================================
+st.title("📊 Polymarket → Kalshi Trading Assistant")
+st.caption("Version 6 · Public market research · Read-only · Manual approval only · No automatic trading")
 
 with st.sidebar:
+    st.subheader("Research settings")
+    bankroll = st.number_input("Simulated bankroll ($)", min_value=1.0, max_value=100000.0, value=55.0, step=5.0)
+    st.caption("This is a planning value only. The app does not connect to your Kalshi account or place orders.")
 
-    st.header("Bankroll & safeguards")
+market_tab, trader_tab, wallet_tab, calculator_tab = st.tabs(["Economic Markets", "Trader Leaderboard", "Wallet Inspector", "Payoff Calculator"])
 
-    bankroll = st.number_input(
-        "Simulated bankroll ($)",
-        min_value=1.0,
-        max_value=100000.0,
-        value=55.0,
-        step=1.0
-    )
-
-    risk = st.slider(
-        "Maximum stake (% bankroll)",
-        min_value=1,
-        max_value=25,
-        value=5
-    )
-
-    stake = bankroll * risk / 100
-
-    st.metric(
-        "Per-trade stake cap",
-        f"${stake:.2f}"
-    )
-
-    pages = st.select_slider(
-        "Market catalog depth",
-        options=[2, 5, 10, 20],
-        value=10,
-        help="Number of event pages to retrieve. Each page requests up to 200 events."
-    )
-
-    st.caption(
-        "No Kalshi account connection. "
-        "No automatic orders."
-    )
-
-
-# ==================================================
-# TABS
-# ==================================================
-
-trader, matcher, calc, check = st.tabs([
-    "Trader activity",
-    "Economic market matcher",
-    "Payoff calculator",
-    "Approval checklist"
-])
-
-
-# ==================================================
-# TAB 1: POLYMARKET TRADER ACTIVITY
-# ==================================================
-
-with trader:
-
-    st.subheader("Look up a Polymarket wallet")
-
-    wallet = st.text_input(
-        "Public wallet address",
-        placeholder="0x..."
-    )
-
-    count = st.selectbox(
-        "Recent trades",
-        [10, 25, 50],
-        index=1
-    )
-
-    if st.button("Load wallet trades"):
-
-        if not wallet.strip():
-
-            st.warning("Enter a wallet address.")
-
-        else:
-
-            try:
-
-                response = requests.get(
-                    POLY + "/trades",
-                    params={
-                        "user": wallet.strip(),
-                        "limit": count
-                    },
-                    headers=HEADERS,
-                    timeout=20
-                )
-
-                response.raise_for_status()
-
-                data = response.json()
-
-                if isinstance(data, dict):
-                    data = data.get("data", [])
-
-                if data:
-
-                    st.dataframe(
-                        data,
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                else:
-
-                    st.info(
-                        "No recent trades returned for that wallet."
-                    )
-
-            except Exception as error:
-
-                st.error(
-                    f"Polymarket request failed: {error}"
-                )
-
-
-# ==================================================
-# TAB 2: ECONOMIC MARKET MATCHER
-# ==================================================
-
-with matcher:
-
-    st.subheader("Search major economic markets")
-
-    st.write(
-        "Find markets covering monetary policy, inflation, "
-        "employment, GDP, consumer activity, housing, and bonds."
-    )
-
-    topic_options = [
-        "All major economic markets"
-    ] + list(ECONOMIC_TOPICS.keys())
-
-    selected_topic = st.selectbox(
-        "Economic category",
-        topic_options
-    )
-
-    keyword = st.text_input(
-        "Optional keyword",
-        placeholder="Fed, CPI, unemployment, GDP, inflation..."
-    )
-
-    reference = st.text_input(
-        "Polymarket market title (optional)",
-        placeholder="Paste a market title to improve matching"
-    )
-
-    search_button = st.button(
-        "Search economic markets",
-        type="primary"
-    )
-
-    if search_button:
-
+with market_tab:
+    st.subheader("Open Kalshi economic markets")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        selected_topic = st.selectbox("Economic category", ["All economic topics"] + list(TOPICS.keys()))
+    with c2:
+        keyword = st.text_input("Optional keyword", placeholder="e.g. Fed, CPI, Powell, GDP")
+    if st.button("Search Kalshi markets", type="primary", key="search_markets"):
+        st.session_state["run_market_search"] = True
+    if st.session_state.get("run_market_search"):
         try:
-
-            with st.spinner(
-                "Retrieving Kalshi economic events and markets..."
-            ):
-
-                markets, event_count = fetch_markets(pages)
-
+            with st.spinner("Loading Kalshi events and nested markets..."):
+                events = fetch_kalshi_events()
             matches = []
-
-            if selected_topic == "All major economic markets":
-
-                allowed_topics = list(ECONOMIC_TOPICS.keys())
-
-            else:
-
-                allowed_topics = [selected_topic]
-
-            # A keyword can narrow an all-market search.
-            keyword_concepts = find_keyword_concepts(keyword)
-
-            if keyword.strip():
-
-                keyword_topics = find_topics(keyword)
-
-                # If the keyword clearly identifies a topic,
-                # narrow the search to that topic.
-                if selected_topic == "All major economic markets" and keyword_topics:
-
-                    allowed_topics = keyword_topics
-
-            for market in markets:
-
-                searchable = market_search_text(market)
-
-                matched_topics = find_topics(searchable)
-
-                matched_topics = [
-                    topic
-                    for topic in matched_topics
-                    if topic in allowed_topics
-                ]
-
-                if not matched_topics:
-                    continue
-
-                # Optional keyword must also match the market.
-                if keyword.strip():
-
-                    keyword_match = any(
-                        phrase_matches(searchable, term)
-                        for term in keyword_concepts
-                    )
-
-                    if not keyword_match:
+            for event in events:
+                event_title = event.get("title", "")
+                event_subtitle = event.get("subtitle", "")
+                event_category = event.get("category", "")
+                markets = event.get("markets", []) or []
+                for market in markets:
+                    title = market.get("title", "")
+                    searchable = " ".join([event_title, event_subtitle, event_category, title, market.get("subtitle", "")])
+                    found_topics = topics_for(searchable)
+                    if selected_topic != "All economic topics" and selected_topic not in found_topics:
                         continue
-
-                # Optional Polymarket title similarity.
-                reference_score = 0.0
-
-                if reference.strip():
-
-                    comparison = (
-                        market.get("title", "")
-                        + " "
-                        + market.get("subtitle", "")
-                        + " "
-                        + market.get("event_title", "")
-                    )
-
-                    reference_score = score(
-                        reference,
-                        comparison
-                    )
-
-                # Give upcoming, shorter-horizon market titles
-                # a useful relevance score only when a reference exists.
-                matches.append({
-                    "market": market,
-                    "topics": matched_topics,
-                    "score": reference_score
-                })
-
-            # With no reference, prioritize markets matching
-            # more than one relevant economic phrase/topic.
-            matches.sort(
-                key=lambda item: (
-                    item["score"],
-                    len(item["topics"])
-                ),
-                reverse=True
-            )
-
-            st.write(
-                f"Retrieved **{event_count:,} events** "
-                f"containing **{len(markets):,} markets** "
-                f"across up to {pages} pages."
-            )
-
-            st.write(
-                f"Found **{len(matches):,} economic market matches**."
-            )
-
+                    if selected_topic == "All economic topics" and not found_topics:
+                        continue
+                    if keyword and not phrase_in(searchable, keyword):
+                        # Allow common abbreviations and short search terms as token matches.
+                        tokens = set(re.findall(r"[a-z0-9]+", norm(searchable)))
+                        if norm(keyword) not in tokens:
+                            continue
+                    matches.append((event, market, found_topics))
+            st.success(f"Retrieved {len(events):,} events · Found {len(matches):,} matching markets")
             if not matches:
+                st.info("No matching markets found. Try a broader category or a shorter keyword.")
+            for event, market, found_topics in matches[:60]:
+                with st.container(border=True):
+                    st.markdown(f"**{market.get('title') or event.get('title') or 'Untitled market'}**")
+                    st.caption(f"{event.get('title', '')} · {' / '.join(found_topics)}")
+                    cols = st.columns(3)
+                    cols[0].metric("YES ask", market.get("yes_ask_dollars") or (f"{market.get('yes_ask')}¢" if market.get("yes_ask") is not None else "—"))
+                    cols[1].metric("NO ask", market.get("no_ask_dollars") or (f"{market.get('no_ask')}¢" if market.get("no_ask") is not None else "—"))
+                    cols[2].metric("Ticker", market.get("ticker", "—"))
+                    if market.get("close_time"):
+                        st.caption(f"Closes: {market.get('close_time')}")
+                    if market.get("rules_primary"):
+                        with st.expander("Settlement rules"):
+                            st.write(market.get("rules_primary"))
+        except Exception as exc:
+            st.error(f"Kalshi market search failed: {exc}")
+            st.caption("If this continues, copy the full error text so we can diagnose the API response.")
 
-                st.info(
-                    "No matching economic markets were found "
-                    "in the events retrieved. Try a different "
-                    "category or keyword, or increase catalog depth."
-                )
-
-            else:
-
-                # Category summary.
-                topic_counts = {}
-
-                for item in matches:
-
-                    for topic in item["topics"]:
-
-                        topic_counts[topic] = (
-                            topic_counts.get(topic, 0) + 1
-                        )
-
-                st.markdown("#### Results by economic category")
-
-                summary_columns = st.columns(3)
-
-                for index, (topic, total) in enumerate(
-                    sorted(
-                        topic_counts.items(),
-                        key=lambda x: x[1],
-                        reverse=True
-                    )
-                ):
-
-                    with summary_columns[index % 3]:
-
-                        st.metric(
-                            topic,
-                            total
-                        )
-
-                st.divider()
-
-                st.markdown("#### Matching markets")
-
-                for index, item in enumerate(
-                    matches[:50],
-                    start=1
-                ):
-
-                    market = item["market"]
-
-                    with st.container(border=True):
-
-                        st.markdown(
-                            f"**{index}. "
-                            f"{market.get('title') or 'Untitled market'}**"
-                        )
-
-                        event_title = market.get(
-                            "event_title",
-                            ""
-                        )
-
-                        if event_title:
-
-                            st.caption(
-                                f"Event: {event_title}"
-                            )
-
-                        st.caption(
-                            "Economic category: "
-                            + ", ".join(item["topics"])
-                        )
-
-                        if market.get("subtitle"):
-
-                            st.caption(
-                                market["subtitle"]
-                            )
-
-                        st.caption(
-                            f"Ticker: `{market.get('ticker', '—')}`"
-                        )
-
-                        left, right = st.columns(2)
-
-                        with left:
-
-                            st.metric(
-                                "YES ask",
-                                market_price(
-                                    market,
-                                    "yes_ask"
-                                )
-                            )
-
-                        with right:
-
-                            st.metric(
-                                "NO ask",
-                                market_price(
-                                    market,
-                                    "no_ask"
-                                )
-                            )
-
-                        if market.get("close_time"):
-
-                            st.caption(
-                                "Close: "
-                                + market["close_time"]
-                            )
-
-                        if market.get("rules_primary"):
-
-                            with st.expander(
-                                "Resolution rules"
-                            ):
-
-                                st.write(
-                                    market["rules_primary"]
-                                )
-
-                if len(matches) > 50:
-
-                    st.info(
-                        f"Showing the first 50 of "
-                        f"{len(matches)} matches."
-                    )
-
-                st.warning(
-                    "These are text matches, not verified "
-                    "trading opportunities. Confirm exact event "
-                    "wording, resolution source, deadline, timezone, "
-                    "liquidity, order-book prices, fees, and settlement rules."
-                )
-
-                st.caption(
-                    "Catalog coverage is limited to the event pages "
-                    "retrieved. A market not shown may still exist "
-                    "outside those pages."
-                )
-
-        except requests.HTTPError as error:
-
-            st.error(
-                f"Kalshi API HTTP error: {error}"
-            )
-
-        except requests.RequestException as error:
-
-            st.error(
-                f"Network request failed: {error}"
-            )
-
-        except Exception as error:
-
-            st.error(
-                f"Market search failed: "
-                f"{type(error).__name__}: {error}"
-            )
-
-
-# ==================================================
-# TAB 3: PAYOFF CALCULATOR
-# ==================================================
-
-with calc:
-
-    st.subheader("Manual trade estimate")
-
-    a, b, c = st.columns(3)
-
+with trader_tab:
+    st.subheader("Find traders by reported Polymarket performance")
+    st.warning("Leaderboard P&L is a ranking signal, not proof of a repeatable edge. Daily/weekly/monthly results can include mark-to-market changes; all-time P&L is realized-only. Volume is reported in shares, not dollars.")
+    a, b, c, d = st.columns(4)
     with a:
-
-        side = st.selectbox(
-            "Contract side",
-            ["YES", "NO"]
-        )
-
+        period = st.selectbox("Performance window", ["ALL", "MONTH", "WEEK", "DAY"], index=0)
     with b:
-
-        ask = st.number_input(
-            "Selected side executable ask (¢)",
-            min_value=1,
-            max_value=99,
-            value=45
-        )
-
+        category = st.selectbox("Category", ["OVERALL", "ECONOMICS", "FINANCE", "CRYPTO", "POLITICS", "SPORTS", "TECH", "WEATHER", "CULTURE", "MENTIONS"])
     with c:
+        rank_by = st.selectbox("Rank by", ["PNL", "VOLUME"])
+    with d:
+        row_limit = st.selectbox("Rows", [10, 25, 50], index=1)
+    if st.button("Load Polymarket leaderboard", type="primary", key="load_leaderboard"):
+        st.session_state["run_leaderboard"] = True
+    if st.session_state.get("run_leaderboard"):
+        try:
+            with st.spinner("Loading the public Polymarket leaderboard..."):
+                leaders, pagination = fetch_leaderboard(period, category, rank_by, row_limit)
+            st.caption(f"Showing {len(leaders)} leaderboard entries · Retrieved {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+            if not leaders:
+                st.info("The leaderboard returned no rows. Try another time window or category.")
+            for row in leaders:
+                wallet = wallet_of(row)
+                with st.container(border=True):
+                    left, right = st.columns([3, 2])
+                    with left:
+                        rank = row.get("rank", "—")
+                        st.markdown(f"**#{rank} · {display_leader(row)}**")
+                        st.caption(wallet if wallet else "Wallet address not supplied by API")
+                        if row.get("verified") or row.get("verified_badge"):
+                            st.caption("✓ Polymarket verified profile")
+                    with right:
+                        st.metric("P&L", money(row.get("pnl")))
+                        st.metric("Volume (shares)", f"{float(row.get('volume', row.get('vol', 0)) or 0):,.0f}")
+                    if wallet:
+                        if st.button("Inspect this wallet", key=f"inspect_{wallet}"):
+                            st.session_state["selected_wallet"] = wallet
+                            st.session_state["selected_wallet_name"] = display_leader(row)
+                            st.session_state["active_tab_hint"] = "wallet"
+                            st.info("Wallet selected. Open the Wallet Inspector tab to review its positions and profile data.")
+            if pagination.get("has_more"):
+                st.caption("More leaderboard entries are available through cursor pagination; this version displays the first page only.")
+        except Exception as exc:
+            st.error(f"Polymarket leaderboard request failed: {exc}")
+            st.caption("The current Polymarket API uses the v2 leaderboard. Copy the full error text if this fails.")
 
-        fee = st.number_input(
-            "Estimated fee per contract (¢)",
-            min_value=0.0,
-            max_value=20.0,
-            value=1.0,
-            step=0.25
-        )
+with wallet_tab:
+    st.subheader("Inspect a Polymarket wallet")
+    default_wallet = st.session_state.get("selected_wallet", "")
+    wallet = st.text_input("Wallet address", value=default_wallet, placeholder="0x…")
+    if st.button("Analyze wallet", type="primary", key="analyze_wallet"):
+        st.session_state["wallet_to_analyze"] = wallet.strip()
+    target = st.session_state.get("wallet_to_analyze", "")
+    if target:
+        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", target):
+            st.error("Enter a valid 42-character Polygon wallet address beginning with 0x.")
+        else:
+            try:
+                with st.spinner("Loading wallet profile and positions..."):
+                    stats = fetch_wallet_stats(target)
+                    open_positions = fetch_wallet_positions(target, "OPEN", 100)
+                    closed_positions = fetch_wallet_positions(target, "CLOSED", 100)
+                if not stats:
+                    st.info("Polymarket did not return a profile record for this wallet. It may still have on-chain activity.")
+                else:
+                    pnl_data = stats.get("all_time_pnl") or {}
+                    realized = pnl_data.get("realized_pnl")
+                    if realized is None:
+                        market_pnl = pnl_data.get("realized_market_pnl") or 0
+                        combo_pnl = pnl_data.get("realized_combo_pnl") or 0
+                        realized = market_pnl + combo_pnl
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("All-time realized P&L", money(realized))
+                    m2.metric("Markets traded", f"{stats.get('trades', 0):,}")
+                    m3.metric("Biggest win", money(stats.get("biggest_win")))
+                    m4.metric("Current open positions", f"{len(open_positions):,}")
+                    st.caption("These are API-reported profile statistics. Markets traded is not the same as number of fills; the API does not provide a reliable win-rate field here.")
+                st.markdown("#### Current open positions")
+                if not open_positions:
+                    st.info("No open positions were returned.")
+                for pos in open_positions[:50]:
+                    with st.container(border=True):
+                        st.markdown(f"**{pos.get('title') or pos.get('name') or 'Untitled market'}**")
+                        st.write(f"Outcome: {pos.get('outcome', '—')} · Average entry: {pos.get('avg_price', '—')} · Current price: {pos.get('current_price', '—')}")
+                        st.write(f"Current value: {money(pos.get('current_value'))} · Unrealized P&L: {money(pos.get('unrealized_pnl'))}")
+                        st.caption(f"Last activity: {pos.get('last_event_at', '—')} · Condition: {pos.get('condition_id', '—')}")
+                with st.expander("Recently closed positions / realized results"):
+                    if not closed_positions:
+                        st.info("No closed positions were returned.")
+                    for pos in closed_positions[:50]:
+                        st.write(f"**{pos.get('title') or pos.get('name') or 'Untitled'}** · {pos.get('outcome', '—')} · Realized P&L: {money(pos.get('realized_pnl'))}")
+            except Exception as exc:
+                st.error(f"Wallet analysis failed: {exc}")
+                st.caption("Copy the complete error text. A 429/503 response can mean the public API is temporarily busy.")
 
-    probability = st.slider(
-        "Your estimated probability of this side winning (%)",
-        min_value=1,
-        max_value=99,
-        value=55
-    )
-
-    contracts = int(
-        stake / (ask / 100 + fee / 100)
-    )
-
-    cost = contracts * ask / 100
-
-    fees = contracts * fee / 100
-
-    net_if_correct = (
-        contracts * (1 - ask / 100) - fees
-    )
-
-    net_if_wrong = cost + fees
-
-    expected_value = contracts * (
-        (probability / 100) * (1 - ask / 100)
-        - (1 - probability / 100) * (ask / 100)
-        - fee / 100
-    )
-
+with calculator_tab:
+    st.subheader("Binary contract payoff calculator")
+    st.caption("Planning calculator only. Enter the price you could actually buy at, not the midpoint or last-traded price.")
     x, y, z = st.columns(3)
-
-    x.metric(
-        "Contracts within cap",
-        contracts
-    )
-
-    y.metric(
-        "Net if correct",
-        f"${net_if_correct:.2f}"
-    )
-
-    z.metric(
-        "Net if wrong",
-        f"-${net_if_wrong:.2f}"
-    )
-
-    st.metric(
-        "Estimated expected value",
-        f"${expected_value:.2f}",
-        delta=(
-            "Positive estimate"
-            if expected_value > 0
-            else "Negative estimate"
-        )
-    )
-
-    st.caption(
-        f"Selected side: {side}. "
-        f"Estimated cost: ${cost:.2f}. "
-        f"Estimated fees: ${fees:.2f}. "
-        f"Break-even probability: {ask + fee:.1f}%. "
-        "Probability is your assumption, not a verified forecast."
-    )
-
-
-# ==================================================
-# TAB 4: APPROVAL CHECKLIST
-# ==================================================
-
-with check:
-
-    st.subheader("Before manually approving a trade")
-
-    st.markdown("""
-    - [ ] Same underlying event on both platforms
-    - [ ] Same outcome and contract direction
-    - [ ] Same threshold and measurement period
-    - [ ] Same deadline and timezone
-    - [ ] Same resolution source and settlement rules
-    - [ ] Polymarket trader position is recent and not exited
-    - [ ] Kalshi executable ask rechecked immediately before trading
-    - [ ] Order-book liquidity is sufficient
-    - [ ] Actual fees and slippage included
-    - [ ] Stake is within the configured cap
-    - [ ] Full stake loss is affordable
-    """)
-
-    st.error(
-        "This application is read-only. It does not authenticate "
-        "to Kalshi or submit orders."
-    )
-
-
-# ==================================================
-# FOOTER
-# ==================================================
+    with x:
+        stake = st.number_input("Maximum stake ($)", min_value=1.0, value=float(min(bankroll, 55.0)), step=1.0)
+    with y:
+        ask_cents = st.number_input("Executable ask (cents)", min_value=1.0, max_value=99.0, value=50.0, step=1.0)
+    with z:
+        fee_per_contract = st.number_input("Estimated fee per contract ($)", min_value=0.0, value=0.01, step=0.01, format="%.3f")
+    estimated_probability = st.slider("Your estimated probability of winning", min_value=1, max_value=99, value=55)
+    price = ask_cents / 100.0
+    cost_each = price + fee_per_contract
+    contracts = int(stake // cost_each) if cost_each > 0 else 0
+    total_cost = contracts * cost_each
+    profit_if_win = contracts * (1.0 - price) - contracts * fee_per_contract
+    loss_if_lose = total_cost
+    ev = contracts * (estimated_probability / 100.0 * (1.0 - price) - (1.0 - estimated_probability / 100.0) * price - fee_per_contract)
+    q1, q2, q3, q4 = st.columns(4)
+    q1.metric("Contracts", f"{contracts:,}")
+    q2.metric("Total cost", money(total_cost))
+    q3.metric("Profit if win", money(profit_if_win))
+    q4.metric("Estimated EV", money(ev))
+    st.write(f"Maximum loss if the contract loses: **{money(loss_if_lose)}**. Remaining bankroll: **{money(max(0, bankroll - total_cost))}**.")
+    st.caption("This estimate excludes any unentered fees, spread changes, partial fills, slippage, and settlement risk. EV is only as good as your probability estimate.")
 
 st.divider()
+st.subheader("Before approving any trade")
+checks = [
+    "The Polymarket and Kalshi contracts resolve on the same real-world event.",
+    "The outcome, threshold, measurement period, deadline, and timezone match exactly.",
+    "The settlement sources and exception rules are compatible.",
+    "The Polymarket position is current and the trader has not exited or reversed it.",
+    "The Kalshi price is an executable ask with enough order-book depth.",
+    "Fees, spread, slippage, and the possibility of losing the full stake are included.",
+    "The stake is within the bankroll limit and affordable to lose completely.",
+]
+for item in checks:
+    st.checkbox(item, key="check_" + str(checks.index(item)))
 
-st.caption(
-    "Public APIs can change or rate-limit requests. "
-    "Displayed prices are snapshots, not guaranteed executable quotes. "
-    "This tool does not guarantee profitable trades."
-)
+st.caption("Data sources: Polymarket public Data API and Kalshi public Trade API. Data can be delayed, incomplete, or changed by the providers. This app is informational and does not provide guaranteed signals or execute trades.")
