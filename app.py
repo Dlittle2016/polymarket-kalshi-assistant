@@ -1,64 +1,132 @@
-
 import re
 import requests
 import streamlit as st
 from datetime import datetime, timezone
 
-st.set_page_config(page_title="Polymarket → Kalshi Assistant", page_icon="📊", layout="wide")
+st.set_page_config(
+    page_title="Polymarket → Kalshi Assistant",
+    page_icon="📊",
+    layout="wide"
+)
 
 KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 POLY_BASE = "https://data-api.polymarket.com"
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MarketResearchAssistant/6.0)"}
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; MarketResearchAssistant/7.0)"
+}
 
 TOPICS = {
-    "Federal Reserve": ["federal reserve", "fomc", "fed funds", "federal funds rate", "interest rate", "rate decision", "rate cut", "rate hike", "rate increase", "rate reduction", "monetary policy", "fed chair", "fed meeting"],
-    "Inflation": ["inflation", "cpi", "core cpi", "pce", "ppi", "price index"],
-    "Employment": ["unemployment", "nonfarm payrolls", "jobs report", "jobless claims", "employment", "labor market", "payrolls", "job creation"],
-    "Economic Growth": ["gdp", "economic growth", "recession", "contraction", "expansion"],
-    "Consumer Economy": ["retail sales", "consumer spending", "consumer confidence", "consumer sentiment", "personal income", "personal spending"],
-    "Housing": ["housing starts", "home sales", "home prices", "housing market", "building permits", "mortgage rates"],
-    "Treasury & Bonds": ["treasury yields", "10-year yield", "2-year yield", "bond yield", "treasury bonds", "treasury rate"],
-    "Business & Manufacturing": ["manufacturing", "industrial production", "pmi", "ism", "business activity", "factory orders", "durable goods"],
+    "Federal Reserve": [
+        "federal reserve", "fomc", "fed funds", "federal funds rate",
+        "interest rate", "rate decision", "rate cut", "rate hike",
+        "rate increase", "rate reduction", "monetary policy",
+        "fed chair", "fed meeting"
+    ],
+    "Inflation": [
+        "inflation", "cpi", "core cpi", "pce", "ppi", "price index"
+    ],
+    "Employment": [
+        "unemployment", "nonfarm payrolls", "jobs report",
+        "jobless claims", "employment", "labor market",
+        "payrolls", "job creation"
+    ],
+    "Economic Growth": [
+        "gdp", "economic growth", "recession", "contraction",
+        "expansion"
+    ],
+    "Consumer Economy": [
+        "retail sales", "consumer spending", "consumer confidence",
+        "consumer sentiment", "personal income", "personal spending"
+    ],
+    "Housing": [
+        "housing starts", "home sales", "home prices",
+        "housing market", "building permits", "mortgage rates"
+    ],
+    "Treasury & Bonds": [
+        "treasury yields", "10-year yield", "2-year yield",
+        "bond yield", "treasury bonds", "treasury rate"
+    ],
+    "Business & Manufacturing": [
+        "manufacturing", "industrial production", "pmi", "ism",
+        "business activity", "factory orders", "durable goods"
+    ],
 }
 
 
 def get_json(url, params=None, timeout=20):
-    response = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+    response = requests.get(
+        url,
+        params=params,
+        headers=HEADERS,
+        timeout=timeout
+    )
     response.raise_for_status()
     return response.json()
 
 
 def norm(value):
-    return re.sub(r"\s+", " ", str(value or "").lower()).strip()
+    return re.sub(
+        r"\s+",
+        " ",
+        str(value or "").lower()
+    ).strip()
 
 
 def phrase_in(text, phrase):
-    text = " " + re.sub(r"[^a-z0-9]+", " ", norm(text)) + " "
-    phrase = " " + re.sub(r"[^a-z0-9]+", " ", norm(phrase)) + " "
+    text = " " + re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        norm(text)
+    ) + " "
+
+    phrase = " " + re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        norm(phrase)
+    ) + " "
+
     return phrase in text
 
 
 def topics_for(text):
     found = []
+
     for topic, phrases in TOPICS.items():
         if any(phrase_in(text, p) for p in phrases):
             found.append(topic)
+
     return found
 
 
 @st.cache_data(ttl=45, show_spinner=False)
 def fetch_kalshi_events(max_pages=10):
-    all_events, cursor = [], None
+    all_events = []
+    cursor = None
+
     for _ in range(max_pages):
-        params = {"status": "open", "limit": 200, "with_nested_markets": "true"}
+        params = {
+            "status": "open",
+            "limit": 200,
+            "with_nested_markets": "true"
+        }
+
         if cursor:
             params["cursor"] = cursor
-        payload = get_json(f"{KALSHI_BASE}/events", params=params)
+
+        payload = get_json(
+            f"{KALSHI_BASE}/events",
+            params=params
+        )
+
         events = payload.get("events", []) or []
         all_events.extend(events)
+
         cursor = payload.get("cursor")
+
         if not cursor:
             break
+
     return all_events
 
 
@@ -70,32 +138,64 @@ def fetch_leaderboard(period, category, sort_by, limit):
         "sort_by": sort_by.upper(),
         "limit": int(limit)
     }
-    payload = get_json(f"{POLY_BASE}/v2/leaderboard", params=params)
+
+    payload = get_json(
+        f"{POLY_BASE}/v2/leaderboard",
+        params=params
+    )
+
     rows = payload.get("data", [])
+
     if isinstance(rows, dict):
-        rows = rows.get("leaderboard", rows.get("data", []))
-    return rows if isinstance(rows, list) else [], payload.get("pagination", {})
+        rows = rows.get(
+            "leaderboard",
+            rows.get("data", [])
+        )
+
+    return (
+        rows if isinstance(rows, list) else [],
+        payload.get("pagination", {})
+    )
 
 
 @st.cache_data(ttl=90, show_spinner=False)
 def fetch_wallet_stats(wallet):
-    payload = get_json(f"{POLY_BASE}/v2/user-stats", params={"user": wallet})
+    payload = get_json(
+        f"{POLY_BASE}/v2/user-stats",
+        params={"user": wallet}
+    )
+
     return payload.get("data")
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_wallet_positions(wallet, status, limit=100):
+    params = {
+        "user": wallet,
+        "status": status,
+        "limit": limit,
+        "sort_by": (
+            "REALIZED_PNL"
+            if status == "CLOSED"
+            else "CURRENT_VALUE"
+        ),
+        "sort_direction": "DESC",
+        "filter_type": "TOKENS",
+        "filter_amount": 0
+    }
+
+    if status == "OPEN":
+        params["include_archived"] = "true"
+
     payload = get_json(
         f"{POLY_BASE}/v2/positions",
-        params={
-            "user": wallet,
-            "status": status,
-            "limit": limit,
-            "sort_by": "REALIZED_PNL" if status == "CLOSED" else "CURRENT_VALUE",
-            "sort_direction": "DESC"
-        }
+        params=params
     )
-    return payload.get("data", []), payload.get("pagination", {})
+
+    return (
+        payload.get("data", []),
+        payload.get("pagination", {})
+    )
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -109,21 +209,34 @@ def fetch_wallet_activity(wallet, limit=100):
             "sort_direction": "DESC"
         }
     )
-    return payload.get("data", []), payload.get("pagination", {})
+
+    return (
+        payload.get("data", []),
+        payload.get("pagination", {})
+    )
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_wallet_pnl(wallet):
     payload = get_json(
         f"{POLY_BASE}/v2/user-pnl",
-        params={"user": wallet, "interval": "max", "fidelity": "1d"}
+        params={
+            "user": wallet,
+            "interval": "max",
+            "fidelity": "1d"
+        }
     )
+
     return payload.get("data")
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_wallet_volume(wallet):
-    payload = get_json(f"{POLY_BASE}/v2/user-volume", params={"user": wallet})
+    payload = get_json(
+        f"{POLY_BASE}/v2/user-volume",
+        params={"user": wallet}
+    )
+
     return payload.get("data")
 
 
@@ -154,13 +267,18 @@ def display_leader(row):
 
 
 st.title("📊 Polymarket → Kalshi Trading Assistant")
+
 st.caption(
     "Version 7 · Trader intelligence · Public market research · "
     "Read-only · Manual approval only · No automatic trading"
 )
 
+
+# SIDEBAR
+
 with st.sidebar:
     st.subheader("Research settings")
+
     bankroll = st.number_input(
         "Simulated bankroll ($)",
         min_value=1.0,
@@ -168,10 +286,14 @@ with st.sidebar:
         value=55.0,
         step=5.0
     )
+
     st.caption(
         "This is a planning value only. The app does not connect "
         "to your Kalshi account or place orders."
     )
+
+
+# TABS
 
 market_tab, trader_tab, wallet_tab, calculator_tab = st.tabs([
     "Economic Markets",
@@ -181,11 +303,12 @@ market_tab, trader_tab, wallet_tab, calculator_tab = st.tabs([
 ])
 
 
-# ---------------------------------------------------------
+# --------------------------------------------------
 # ECONOMIC MARKETS
-# ---------------------------------------------------------
+# --------------------------------------------------
 
 with market_tab:
+
     st.subheader("Open Kalshi economic markets")
 
     c1, c2 = st.columns([1, 2])
@@ -210,19 +333,25 @@ with market_tab:
         st.session_state["run_market_search"] = True
 
     if st.session_state.get("run_market_search"):
+
         try:
-            with st.spinner("Loading Kalshi events and nested markets..."):
+            with st.spinner(
+                "Loading Kalshi events and nested markets..."
+            ):
                 events = fetch_kalshi_events()
 
             matches = []
 
             for event in events:
+
                 event_title = event.get("title", "")
                 event_subtitle = event.get("subtitle", "")
                 event_category = event.get("category", "")
+
                 markets = event.get("markets", []) or []
 
                 for market in markets:
+
                     title = market.get("title", "")
 
                     searchable = " ".join([
@@ -248,13 +377,20 @@ with market_tab:
                         continue
 
                     if keyword and not phrase_in(searchable, keyword):
+
                         tokens = set(
-                            re.findall(r"[a-z0-9]+", norm(searchable))
+                            re.findall(
+                                r"[a-z0-9]+",
+                                norm(searchable)
+                            )
                         )
+
                         if norm(keyword) not in tokens:
                             continue
 
-                    matches.append((event, market, found_topics))
+                    matches.append(
+                        (event, market, found_topics)
+                    )
 
             st.success(
                 f"Retrieved {len(events):,} events · "
@@ -263,18 +399,21 @@ with market_tab:
 
             if not matches:
                 st.info(
-                    "No matching markets found. Try a broader category "
-                    "or a shorter keyword."
+                    "No matching markets found. Try a broader "
+                    "category or a shorter keyword."
                 )
 
             for event, market, found_topics in matches[:60]:
+
                 with st.container(border=True):
+
                     st.markdown(
                         f"**{market.get('title') or event.get('title') or 'Untitled market'}**"
                     )
 
                     st.caption(
-                        f"{event.get('title', '')} · {' / '.join(found_topics)}"
+                        f"{event.get('title', '')} · "
+                        f"{' / '.join(found_topics)}"
                     )
 
                     cols = st.columns(3)
@@ -310,28 +449,39 @@ with market_tab:
                         )
 
                     if market.get("rules_primary"):
+
                         with st.expander("Settlement rules"):
-                            st.write(market.get("rules_primary"))
+                            st.write(
+                                market.get("rules_primary")
+                            )
 
         except Exception as exc:
-            st.error(f"Kalshi market search failed: {exc}")
+
+            st.error(
+                f"Kalshi market search failed: {exc}"
+            )
+
             st.caption(
                 "If this continues, copy the full error text "
                 "so we can diagnose the API response."
             )
 
 
-# ---------------------------------------------------------
-# TRADER LEADERBOARD
-# ---------------------------------------------------------
+# --------------------------------------------------
+# POLYMARKET TRADER LEADERBOARD
+# --------------------------------------------------
 
 with trader_tab:
-    st.subheader("Find traders by reported Polymarket performance")
+
+    st.subheader(
+        "Find traders by reported Polymarket performance"
+    )
 
     st.warning(
-        "Leaderboard P&L is a ranking signal, not proof of a repeatable edge. "
-        "Daily/weekly/monthly results can include mark-to-market changes; "
-        "all-time P&L is realized-only. Volume is reported in shares, not dollars."
+        "Leaderboard P&L is a ranking signal, not proof of a "
+        "repeatable edge. Daily/weekly/monthly results can include "
+        "mark-to-market changes; all-time P&L is realized-only. "
+        "Volume is reported in shares, not dollars."
     )
 
     a, b, c, d = st.columns(4)
@@ -381,8 +531,11 @@ with trader_tab:
         st.session_state["run_leaderboard"] = True
 
     if st.session_state.get("run_leaderboard"):
+
         try:
-            with st.spinner("Loading the public Polymarket leaderboard..."):
+            with st.spinner(
+                "Loading the public Polymarket leaderboard..."
+            ):
                 leaders, pagination = fetch_leaderboard(
                     period,
                     category,
@@ -402,12 +555,15 @@ with trader_tab:
                 )
 
             for row in leaders:
+
                 wallet = wallet_of(row)
 
                 with st.container(border=True):
+
                     left, right = st.columns([3, 2])
 
                     with left:
+
                         rank = row.get("rank", "—")
 
                         st.markdown(
@@ -415,15 +571,25 @@ with trader_tab:
                         )
 
                         st.caption(
-                            wallet if wallet
+                            wallet
+                            if wallet
                             else "Wallet address not supplied by API"
                         )
 
-                        if row.get("verified") or row.get("verified_badge"):
-                            st.caption("✓ Polymarket verified profile")
+                        if (
+                            row.get("verified")
+                            or row.get("verified_badge")
+                        ):
+                            st.caption(
+                                "✓ Polymarket verified profile"
+                            )
 
                     with right:
-                        st.metric("P&L", money(row.get("pnl")))
+
+                        st.metric(
+                            "P&L",
+                            money(row.get("pnl"))
+                        )
 
                         st.metric(
                             "Volume (shares)",
@@ -431,12 +597,18 @@ with trader_tab:
                         )
 
                     if wallet:
+
                         if st.button(
                             "Inspect this wallet",
                             key=f"inspect_{wallet}"
                         ):
+
                             st.session_state["selected_wallet"] = wallet
-                            st.session_state["selected_wallet_name"] = display_leader(row)
+
+                            st.session_state["selected_wallet_name"] = (
+                                display_leader(row)
+                            )
+
                             st.session_state["active_tab_hint"] = "wallet"
 
                             st.info(
@@ -445,24 +617,30 @@ with trader_tab:
                             )
 
             if pagination.get("has_more"):
+
                 st.caption(
                     "More leaderboard entries are available through "
                     "cursor pagination; this version displays the first page only."
                 )
 
         except Exception as exc:
-            st.error(f"Polymarket leaderboard request failed: {exc}")
+
+            st.error(
+                f"Polymarket leaderboard request failed: {exc}"
+            )
+
             st.caption(
                 "The current Polymarket API uses the v2 leaderboard. "
                 "Copy the full error text if this fails."
             )
 
 
-# ---------------------------------------------------------
+# --------------------------------------------------
 # WALLET INSPECTOR
-# ---------------------------------------------------------
+# --------------------------------------------------
 
 with wallet_tab:
+
     st.subheader(
         "Trader intelligence: inspect positions, activity, and P&L"
     )
@@ -482,7 +660,9 @@ with wallet_tab:
         "Theo4 (leaderboard #1)"
     )
 
-    st.write(f"Selected research target: **{default_name}**")
+    st.write(
+        f"Selected research target: **{default_name}**"
+    )
 
     wallet = st.text_input(
         "Wallet address",
@@ -503,53 +683,73 @@ with wallet_tab:
     )
 
     if target:
-        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", target):
+
+        if not re.fullmatch(
+            r"0x[a-fA-F0-9]{40}",
+            target
+        ):
+
             st.error(
-                "Enter a valid 42-character Polygon wallet address beginning with 0x."
+                "Enter a valid 42-character Polygon wallet address "
+                "beginning with 0x."
             )
 
         else:
+
             try:
+
                 with st.spinner(
                     "Loading profile, positions, recent activity, and P&L history..."
                 ):
+
                     stats = fetch_wallet_stats(target)
 
-                    open_positions, open_pagination = fetch_wallet_positions(
-                        target,
-                        "OPEN",
-                        100
+                    open_positions, open_pagination = (
+                        fetch_wallet_positions(
+                            target,
+                            "OPEN",
+                            100
+                        )
                     )
 
-                    closed_positions, closed_pagination = fetch_wallet_positions(
-                        target,
-                        "CLOSED",
-                        100
+                    closed_positions, closed_pagination = (
+                        fetch_wallet_positions(
+                            target,
+                            "CLOSED",
+                            100
+                        )
                     )
 
-                    activity, activity_pagination = fetch_wallet_activity(
-                        target,
-                        100
+                    activity, activity_pagination = (
+                        fetch_wallet_activity(
+                            target,
+                            100
+                        )
                     )
 
                     pnl_history = fetch_wallet_pnl(target)
+
                     volume_data = fetch_wallet_volume(target)
 
                 if not stats:
+
                     st.info(
-                        "Polymarket did not return a profile record for this wallet. "
-                        "Other wallet data may still be available."
+                        "Polymarket did not return a profile record "
+                        "for this wallet. Other wallet data may still be available."
                     )
 
                 else:
+
                     pnl_data = stats.get("all_time_pnl") or {}
 
                     realized = pnl_data.get("realized_pnl")
 
                     if realized is None:
+
                         realized = (
                             (pnl_data.get("realized_market_pnl") or 0)
-                            + (pnl_data.get("realized_combo_pnl") or 0)
+                            +
+                            (pnl_data.get("realized_combo_pnl") or 0)
                         )
 
                     m1, m2, m3, m4 = st.columns(4)
@@ -575,6 +775,7 @@ with wallet_tab:
                     )
 
                     if stats.get("join_date"):
+
                         joined = datetime.fromtimestamp(
                             stats["join_date"],
                             timezone.utc
@@ -586,6 +787,7 @@ with wallet_tab:
                         )
 
                 if volume_data:
+
                     v1, v2, v3 = st.columns(3)
 
                     v1.metric(
@@ -608,10 +810,21 @@ with wallet_tab:
                 st.markdown("#### Current open positions")
 
                 if not open_positions:
-                    st.info("No open positions were returned.")
+
+                    st.info(
+                        "No open positions were returned by the Polymarket API."
+                    )
+
+                    st.caption(
+                        "The request includes archived open positions and "
+                        "sets the minimum token filter to zero. If this remains "
+                        "empty, the wallet may genuinely have no current holdings."
+                    )
 
                 for pos in open_positions[:50]:
+
                     with st.container(border=True):
+
                         st.markdown(
                             f"**{pos.get('title') or pos.get('name') or 'Untitled market'}**"
                         )
@@ -651,6 +864,7 @@ with wallet_tab:
                         )
 
                 if open_pagination.get("has_more"):
+
                     st.caption(
                         "More open positions exist beyond the first 100 returned."
                     )
@@ -665,9 +879,13 @@ with wallet_tab:
                 )
 
                 if not activity:
-                    st.info("No recent activity was returned.")
+
+                    st.info(
+                        "No recent activity was returned."
+                    )
 
                 for item in activity[:50]:
+
                     ts = item.get("timestamp")
 
                     when = (
@@ -686,11 +904,21 @@ with wallet_tab:
                         or "Untitled market"
                     )
 
-                    side = item.get("side") or item.get("type") or "Activity"
+                    side = (
+                        item.get("side")
+                        or item.get("type")
+                        or "Activity"
+                    )
+
                     outcome = item.get("outcome") or ""
+
                     price_val = item.get("price")
                     size_val = item.get("size")
-                    value_val = item.get("usdcSize") or item.get("usdc_size")
+
+                    value_val = (
+                        item.get("usdcSize")
+                        or item.get("usdc_size")
+                    )
 
                     details = []
 
@@ -698,13 +926,19 @@ with wallet_tab:
                         details.append(str(outcome))
 
                     if price_val is not None:
-                        details.append(f"Price {float(price_val):.3f}")
+                        details.append(
+                            f"Price {float(price_val):.3f}"
+                        )
 
                     if size_val is not None:
-                        details.append(f"Shares {float(size_val):,.2f}")
+                        details.append(
+                            f"Shares {float(size_val):,.2f}"
+                        )
 
                     if value_val is not None:
-                        details.append(f"Value {money(value_val)}")
+                        details.append(
+                            f"Value {money(value_val)}"
+                        )
 
                     st.write(
                         f"**{when} · {side} · {title}**"
@@ -717,6 +951,7 @@ with wallet_tab:
                     )
 
                 if activity_pagination.get("has_more"):
+
                     st.caption(
                         "More activity is available through cursor pagination; "
                         "this view shows the first 100 records."
@@ -733,11 +968,13 @@ with wallet_tab:
                 )
 
                 if points:
+
                     import pandas as pd
 
                     pnl_rows = []
 
                     for point in points:
+
                         stamp = point.get("timestamp")
 
                         if stamp is None:
@@ -756,10 +993,16 @@ with wallet_tab:
                         pnl_rows.append(row)
 
                     if pnl_rows:
-                        frame = pd.DataFrame(pnl_rows).set_index("Date").sort_index()
+
+                        frame = (
+                            pd.DataFrame(pnl_rows)
+                            .set_index("Date")
+                            .sort_index()
+                        )
 
                         chart_cols = [
-                            col for col in [
+                            col
+                            for col in [
                                 "Realized P&L",
                                 "Unrealized P&L"
                             ]
@@ -775,6 +1018,7 @@ with wallet_tab:
                         )
 
                 else:
+
                     st.info(
                         "No P&L time series was returned for this wallet."
                     )
@@ -784,12 +1028,15 @@ with wallet_tab:
                 with st.expander(
                     "Recently closed positions / realized results"
                 ):
+
                     if not closed_positions:
+
                         st.info(
                             "No closed positions were returned."
                         )
 
                     for pos in closed_positions[:50]:
+
                         st.write(
                             f"**{pos.get('title') or pos.get('name') or 'Untitled'}** · "
                             f"{pos.get('outcome', '—')} · "
@@ -799,6 +1046,7 @@ with wallet_tab:
                         )
 
                     if closed_pagination.get("has_more"):
+
                         st.caption(
                             "Additional closed positions are available beyond this first page."
                         )
@@ -807,13 +1055,17 @@ with wallet_tab:
                     "Interpretation caution: the leaderboard's headline P&L, "
                     "wallet profile P&L, position-level P&L, and P&L history "
                     "may use different windows or accounting components. "
-                    "A current position is not proof the trader still has the "
-                    "same conviction; activity timestamps can lag. Never mirror "
-                    "a position without checking the live market and exact settlement rules."
+                    "A current position is not proof the trader still has "
+                    "the same conviction; activity timestamps can lag. "
+                    "Never mirror a position without checking the live market "
+                    "and exact settlement rules."
                 )
 
             except Exception as exc:
-                st.error(f"Wallet analysis failed: {exc}")
+
+                st.error(
+                    f"Wallet analysis failed: {exc}"
+                )
 
                 st.caption(
                     "Copy the complete error text. Public endpoints may "
@@ -821,11 +1073,12 @@ with wallet_tab:
                 )
 
 
-# ---------------------------------------------------------
+# --------------------------------------------------
 # PAYOFF CALCULATOR
-# ---------------------------------------------------------
+# --------------------------------------------------
 
 with calculator_tab:
+
     st.subheader("Binary contract payoff calculator")
 
     st.caption(
@@ -836,6 +1089,7 @@ with calculator_tab:
     x, y, z = st.columns(3)
 
     with x:
+
         stake = st.number_input(
             "Maximum stake ($)",
             min_value=1.0,
@@ -844,6 +1098,7 @@ with calculator_tab:
         )
 
     with y:
+
         ask_cents = st.number_input(
             "Executable ask (cents)",
             min_value=1.0,
@@ -853,6 +1108,7 @@ with calculator_tab:
         )
 
     with z:
+
         fee_per_contract = st.number_input(
             "Estimated fee per contract ($)",
             min_value=0.0,
@@ -869,8 +1125,15 @@ with calculator_tab:
     )
 
     price = ask_cents / 100.0
+
     cost_each = price + fee_per_contract
-    contracts = int(stake // cost_each) if cost_each > 0 else 0
+
+    contracts = (
+        int(stake // cost_each)
+        if cost_each > 0
+        else 0
+    )
+
     total_cost = contracts * cost_each
 
     profit_if_win = (
@@ -882,16 +1145,33 @@ with calculator_tab:
 
     ev = contracts * (
         estimated_probability / 100.0 * (1.0 - price)
-        - (1.0 - estimated_probability / 100.0) * price
-        - fee_per_contract
+        -
+        (1.0 - estimated_probability / 100.0) * price
+        -
+        fee_per_contract
     )
 
     q1, q2, q3, q4 = st.columns(4)
 
-    q1.metric("Contracts", f"{contracts:,}")
-    q2.metric("Total cost", money(total_cost))
-    q3.metric("Profit if win", money(profit_if_win))
-    q4.metric("Estimated EV", money(ev))
+    q1.metric(
+        "Contracts",
+        f"{contracts:,}"
+    )
+
+    q2.metric(
+        "Total cost",
+        money(total_cost)
+    )
+
+    q3.metric(
+        "Profit if win",
+        money(profit_if_win)
+    )
+
+    q4.metric(
+        "Estimated EV",
+        money(ev)
+    )
 
     st.write(
         f"Maximum loss if the contract loses: **{money(loss_if_lose)}**. "
@@ -905,11 +1185,12 @@ with calculator_tab:
     )
 
 
-# ---------------------------------------------------------
-# APPROVAL CHECKLIST
-# ---------------------------------------------------------
+# --------------------------------------------------
+# MANUAL TRADE APPROVAL CHECKLIST
+# --------------------------------------------------
 
 st.divider()
+
 st.subheader("Before approving any trade")
 
 checks = [
@@ -919,14 +1200,16 @@ checks = [
     "The Polymarket position is current and the trader has not exited or reversed it.",
     "The Kalshi price is an executable ask with enough order-book depth.",
     "Fees, spread, slippage, and the possibility of losing the full stake are included.",
-    "The stake is within the bankroll limit and affordable to lose completely.",
+    "The stake is within the bankroll limit and affordable to lose completely."
 ]
 
 for item in checks:
+
     st.checkbox(
         item,
         key="check_" + str(checks.index(item))
     )
+
 
 st.caption(
     "Data sources: Polymarket public Data API and Kalshi public Trade API. "
