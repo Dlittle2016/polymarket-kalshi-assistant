@@ -167,37 +167,68 @@ def get_list(payload):
 
 
 def group_positions(positions):
+    """Aggregate every outcome token in each market condition, not only YES/NO."""
     groups = {}
     for pos in positions:
-        condition = str(pos.get("condition_id") or pos.get("conditionId") or pos.get("slug") or pos.get("title") or "unknown")
-        group = groups.setdefault(condition, {"condition": condition, "title": pos.get("title") or pos.get("name") or "Untitled market", "positions": [], "yes_shares": 0.0, "no_shares": 0.0, "yes_cost": 0.0, "no_cost": 0.0, "yes_value": 0.0, "no_value": 0.0, "yes_pnl": 0.0, "no_pnl": 0.0, "archived": False, "end_date": pos.get("end_date"), "active": True})
+        condition = str(
+            pos.get("condition_id") or pos.get("conditionId") or
+            pos.get("slug") or pos.get("title") or "unknown"
+        )
+        group = groups.setdefault(condition, {
+            "condition": condition,
+            "title": pos.get("title") or pos.get("name") or "Untitled market",
+            "positions": [], "outcomes": {},
+            "yes_shares": 0.0, "no_shares": 0.0,
+            "yes_cost": 0.0, "no_cost": 0.0,
+            "yes_value": 0.0, "no_value": 0.0,
+            "yes_pnl": 0.0, "no_pnl": 0.0,
+            "archived": False, "end_date": pos.get("end_date"),
+            "active": True,
+        })
         group["positions"].append(pos)
-        outcome = norm(pos.get("outcome"))
+        outcome_raw = pos.get("outcome") or "Unknown outcome"
+        outcome_key = norm(outcome_raw) or "unknown outcome"
         shares = number(pos.get("current_size"))
         cost = number(pos.get("total_cost_usdc", pos.get("entry_cost_usdc")))
         value = number(pos.get("current_value"))
         pnl = number(pos.get("unrealized_pnl", pos.get("total_pnl")))
-        if outcome == "yes":
+        outcome = group["outcomes"].setdefault(outcome_key, {
+            "label": str(outcome_raw), "shares": 0.0, "cost": 0.0,
+            "value": 0.0, "pnl": 0.0, "positions": 0,
+        })
+        outcome["shares"] += shares
+        outcome["cost"] += cost
+        outcome["value"] += value
+        outcome["pnl"] += pnl
+        outcome["positions"] += 1
+
+        # Keep binary YES/NO totals only when the actual outcome labels say YES/NO.
+        if outcome_key == "yes":
             group["yes_shares"] += shares
             group["yes_cost"] += cost
             group["yes_value"] += value
             group["yes_pnl"] += pnl
-        elif outcome == "no":
+        elif outcome_key == "no":
             group["no_shares"] += shares
             group["no_cost"] += cost
             group["no_value"] += value
             group["no_pnl"] += pnl
+
         group["archived"] = group["archived"] or bool(pos.get("archived"))
         group["active"] = group["active"] and market_is_active(pos)
         if pos.get("end_date"):
             group["end_date"] = pos.get("end_date")
+
     for group in groups.values():
-        group["total_cost"] = group["yes_cost"] + group["no_cost"]
-        group["total_value"] = group["yes_value"] + group["no_value"]
-        group["total_pnl"] = group["yes_pnl"] + group["no_pnl"]
+        group["total_cost"] = sum(x["cost"] for x in group["outcomes"].values())
+        group["total_value"] = sum(x["value"] for x in group["outcomes"].values())
+        group["total_pnl"] = sum(x["pnl"] for x in group["outcomes"].values())
         group["net_yes_shares"] = group["yes_shares"] - group["no_shares"]
         group["has_both_sides"] = group["yes_shares"] > 0 and group["no_shares"] > 0
+        group["outcome_count"] = len(group["outcomes"])
+        group["has_multiple_outcomes"] = group["outcome_count"] > 1
         group["position_count"] = len(group["positions"])
+        group["outcomes"] = sorted(group["outcomes"].values(), key=lambda x: x["value"], reverse=True)
     return list(groups.values())
 
 
@@ -205,24 +236,41 @@ def render_group(group):
     with st.container(border=True):
         label = "ACTIVE MARKET" if group["active"] else "ARCHIVED / ENDED MARKET"
         st.markdown(f"**{group['title']}**")
-        st.caption(f"{label} · {group['position_count']} token position(s) · End date: {group['end_date'] or 'not supplied'}")
+        st.caption(f"{label} · {group['position_count']} token position(s) · {group['outcome_count']} distinct outcome(s) · End date: {group['end_date'] or 'not supplied'}")
         if group["has_both_sides"]:
-            st.warning("OPPOSITE-SIDE HOLDING: both YES and NO are held in this same condition.")
+            st.warning("BINARY OPPOSITE-SIDE HOLDING: both YES and NO are held in this same condition.")
+        elif group["has_multiple_outcomes"]:
+            st.info("MULTI-OUTCOME EXPOSURE: this market uses named outcomes. These are not being misclassified as YES/NO.")
         a1, a2, a3, a4 = st.columns(4)
-        a1.metric("YES shares", f"{group['yes_shares']:,.4f}")
-        a2.metric("NO shares", f"{group['no_shares']:,.4f}")
-        a3.metric("Net direction", f"{'YES' if group['net_yes_shares'] > 0 else 'NO' if group['net_yes_shares'] < 0 else 'Neutral'} · {abs(group['net_yes_shares']):,.4f}")
+        a1.metric("Distinct outcomes", f"{group['outcome_count']:,}")
+        a2.metric("Combined cost", money(group["total_cost"]))
+        a3.metric("Combined value", money(group["total_value"]))
         a4.metric("Combined P&L", money(group["total_pnl"]))
-        b1, b2, b3 = st.columns(3)
-        b1.metric("Combined cost", money(group["total_cost"]))
-        b2.metric("Combined value", money(group["total_value"]))
-        b3.metric("Combined return", f"{(group['total_pnl'] / group['total_cost'] * 100):.2f}%" if group["total_cost"] else "—")
-        for pos in group["positions"]:
-            st.caption(f"{str(pos.get('outcome', 'Unknown')).upper()}: {number(pos.get('current_size')):,.4f} shares · Entry {number(pos.get('avg_price')):.4f} · Current {number(pos.get('current_price')):.4f} · P&L {money(pos.get('unrealized_pnl'))} · Archived={bool(pos.get('archived'))}")
+        b1, b2 = st.columns(2)
+        b1.metric("Combined return", f"{(group['total_pnl'] / group['total_cost'] * 100):.2f}%" if group["total_cost"] else "—")
+        b2.metric("Position count", f"{group['position_count']:,}")
+        st.markdown("**Outcome-by-outcome exposure**")
+        for outcome in group["outcomes"]:
+            st.caption(
+                f"{outcome['label'].upper()}: {outcome['shares']:,.4f} shares · "
+                f"Cost {money(outcome['cost'])} · Value {money(outcome['value'])} · "
+                f"P&L {money(outcome['pnl'])} · {outcome['positions']} position(s)"
+            )
+        with st.expander("Individual token positions"):
+            for pos in group["positions"]:
+                st.write(
+                    f"**{str(pos.get('outcome', 'Unknown')).upper()}** · "
+                    f"{number(pos.get('current_size')):,.4f} shares · "
+                    f"Entry {number(pos.get('avg_price')):.4f} · "
+                    f"Current {number(pos.get('current_price')):.4f} · "
+                    f"P&L {money(pos.get('unrealized_pnl'))} · "
+                    f"Archived={bool(pos.get('archived'))}"
+                )
         st.caption(f"Condition ID: {group['condition']}")
 
+
 st.title("📊 Polymarket → Kalshi Trading Assistant")
-st.caption("Version 9 · Trader Strategy Analyzer · Public data · Read-only · Manual approval only · No automatic trading")
+st.caption("Version 10 · Multi-Outcome Trader Analyzer · Public data · Read-only · Manual approval only · No automatic trading")
 
 with st.sidebar:
     st.subheader("Research settings")
@@ -318,7 +366,7 @@ with trader_tab:
 
 with wallet_tab:
     st.subheader("Trader Strategy Analyzer")
-    st.caption("Groups YES/NO tokens by market condition, detects opposite-side holdings, and separates archived markets from currently active markets.")
+    st.caption("Aggregates all outcome tokens by market, distinguishes binary YES/NO from named outcomes such as teams, players, OVER and UNDER, and separates archived/ended markets from active markets.")
     default_wallet = st.session_state.get("selected_wallet", "0x56687bf447db6ffa42ffe2204a05edaa20f55839")
     default_name = st.session_state.get("selected_wallet_name", "Theo4")
     st.write(f"Selected research target: **{default_name}**")
@@ -367,7 +415,7 @@ with wallet_tab:
                     s3.metric("Lifetime volume", money(volume_data.get("volume_usdc")))
 
                 st.markdown("### Strategy overview")
-                st.write(f"**Active-market groups:** {len(active_groups)} · **Archived/ended groups:** {len(archived_groups)} · **Opposite-side groups:** {len(both_sides)} · **Combo positions:** {len(combo_positions)}")
+                st.write(f"**Active-market groups:** {len(active_groups)} · **Archived/ended groups:** {len(archived_groups)} · **Binary YES + NO groups:** {len(both_sides)} · **Combo positions:** {len(combo_positions)}")
                 if both_sides:
                     st.warning("This trader holds YES and NO on at least one identical market. Do not copy one side in isolation without understanding the combined exposure.")
 
