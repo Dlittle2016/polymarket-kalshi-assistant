@@ -1,20 +1,7 @@
-# Polymarket → Kalshi Assistant v1
+# Polymarket → Kalshi Assistant v2
 
-Read-only Streamlit prototype for trader activity, candidate market matching, price comparison, and stake limits.
+Replace the repository's `app.py` and `requirements.txt` with these files. This version retrieves multiple pages of open Kalshi markets (up to the selected page depth), filters and ranks keyword matches, and includes wallet trade lookup and a manual risk calculator.
 
-## Run
-Python 3.10+:
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+Run with `pip install -r requirements.txt` then `streamlit run app.py`.
 
-## Scope and safeguards
-- No Kalshi account connection or live order placement.
-- Market title similarity is a screening aid, not proof of equivalent settlement.
-- Fees are manually estimated; slippage and actual fee schedules may differ.
-- Always verify market rules and executable prices. A trade can lose its entire stake.
-
-Public endpoints used:
-- `https://data-api.polymarket.com/trades`
-- `https://api.elections.kalshi.com/trade-api/v2/markets`
+Read-only prototype: no account authentication or order placement. Similar titles do not prove identical settlement conditions. Verify full rules, deadlines, settlement sources, live executable prices, fees, and slippage. All trades can lose the full stake.
