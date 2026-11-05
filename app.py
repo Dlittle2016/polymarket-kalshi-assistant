@@ -1,152 +1,376 @@
+import re
+from datetime import datetime, timezone, date
 
-353
-354
-355
-356
-357
-358
-359
-360
-361
-362
-363
-364
-365
-366
-367
-368
-369
-370
-371
-372
-373
-374
-375
-376
-377
-378
-379
-380
-381
-382
-383
-384
-385
-386
-387
-388
-389
-390
-391
-392
-393
-394
-395
-396
-397
-398
-399
-400
-401
-402
-403
-404
-405
-406
-407
-408
-409
-410
-411
-412
-413
-414
-415
-416
-417
-418
-419
-420
-421
-422
-423
-424
-425
-426
-427
-428
-429
-430
-431
-432
-433
-434
-435
-436
-437
-438
-439
-440
-441
-442
-443
-444
-445
-446
-447
-448
-449
-450
-451
-452
-453
-454
-455
-456
-457
-458
-459
-460
-461
-462
-463
-464
-465
-466
-467
-468
-469
-470
-471
-472
-473
-474
-475
-476
-477
-478
-479
-480
+import requests
+import streamlit as st
 
-                def render_group(group):
-                    with st.container(border=True):
-                        label = "ACTIVE MARKET" if group["active"] else "ARCHIVED / ENDED MARKET"
-                        st.markdown(f"**{group['title']}**")
-                        st.caption(f"{label} · {group['position_count']} token position(s) · End date: {group['end_date'] or 'not supplied'}")
-                        if group["has_both_sides"]:
-                            st.warning("OPPOSITE-SIDE HOLDING: both YES and NO are held in this same condition.")
-                        a1, a2, a3, a4 = st.columns(4)
-                        a1.metric("YES shares", f"{group['yes_shares']:,.4f}")
-                        a2.metric("NO shares", f"{group['no_shares']:,.4f}")
-                        a3.metric("Net direction", f"{'YES' if group['net_yes_shares'] > 0 else 'NO' if group['net_yes_shares'] < 0 else 'Neutral'} · {abs(group['net_yes_shares']):,.4f}")
-                        a4.metric("Combined P&L", money(group["total_pnl"]))
-                        b1, b2, b3 = st.columns(3)
-                        b1.metric("Combined cost", money(group["total_cost"]))
-                        b2.metric("Combined value", money(group["total_value"]))
-                        b3.metric("Combined return", f"{(group['total_pnl'] / group['total_cost'] * 100):.2f}%" if group["total_cost"] else "—")
-                        for pos in group["positions"]:
-                            st.caption(f"{str(pos.get('outcome', 'Unknown')).upper()}: {number(pos.get('current_size')):,.4f} shares · Entry {number(pos.get('avg_price')):.4f} · Current {number(pos.get('current_price')):.4f} · P&L {money(pos.get('unrealized_pnl'))} · Archived={bool(pos.get('archived'))}")
-                        st.caption(f"Condition ID: {group['condition']}")
+st.set_page_config(page_title="Polymarket → Kalshi Assistant", page_icon="📊", layout="wide")
+
+POLY_BASE = "https://data-api.polymarket.com"
+KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MarketResearchAssistant/9.0)"}
+
+TOPICS = {
+    "Federal Reserve": ["federal reserve", "fomc", "fed funds", "federal funds rate", "interest rate", "rate decision", "rate cut", "rate hike", "rate increase", "rate reduction", "monetary policy", "fed chair", "fed meeting"],
+    "Inflation": ["inflation", "cpi", "core cpi", "pce", "ppi", "price index"],
+    "Employment": ["unemployment", "nonfarm payrolls", "jobs report", "jobless claims", "employment", "labor market", "payrolls", "job creation"],
+    "Economic Growth": ["gdp", "economic growth", "recession", "contraction", "expansion"],
+    "Consumer Economy": ["retail sales", "consumer spending", "consumer confidence", "consumer sentiment", "personal income", "personal spending"],
+    "Housing": ["housing starts", "home sales", "home prices", "housing market", "building permits", "mortgage rates"],
+    "Treasury & Bonds": ["treasury yields", "10-year yield", "2-year yield", "bond yield", "treasury bonds", "treasury rate"],
+    "Business & Manufacturing": ["manufacturing", "industrial production", "pmi", "ism", "business activity", "factory orders", "durable goods"],
+}
+
+
+def get_json(url, params=None, timeout=25):
+    response = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+    response.raise_for_status()
+    return response.json(), response.status_code, response.headers.get("x-request-id") or response.headers.get("x-trace-id")
+
+
+def data_rows(payload):
+    data = payload.get("data", []) if isinstance(payload, dict) else []
+    if isinstance(data, dict):
+        for key in ("positions", "results", "items", "data", "leaderboard"):
+            if isinstance(data.get(key), list):
+                return data[key]
+        return []
+    return data if isinstance(data, list) else []
+
+
+def norm(value):
+    return re.sub(r"\s+", " ", str(value or "").lower()).strip()
+
+
+def phrase_in(text, phrase):
+    clean_text = " " + re.sub(r"[^a-z0-9]+", " ", norm(text)) + " "
+    clean_phrase = " " + re.sub(r"[^a-z0-9]+", " ", norm(phrase)) + " "
+    return clean_phrase in clean_text
+
+
+def topics_for(text):
+    return [topic for topic, phrases in TOPICS.items() if any(phrase_in(text, p) for p in phrases)]
+
+
+def money(value):
+    try:
+        return f"${float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def number(value, default=0.0):
+    try:
+        return float(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def wallet_of(row):
+    candidates = [row.get(k) for k in ("proxyWallet", "proxy_wallet", "proxy_wallet_address", "user_id", "userId", "wallet", "address", "user")]
+    for value in candidates:
+        if isinstance(value, str) and re.fullmatch(r"0x[a-fA-F0-9]{40}", value):
+            return value
+    for value in row.values():
+        if isinstance(value, dict):
+            found = wallet_of(value)
+            if found:
+                return found
+    return ""
+
+
+def display_leader(row):
+    for key in ("userName", "user_name", "username", "name", "displayName", "display_name", "pseudonym"):
+        if row.get(key):
+            return str(row[key])
+    wallet = wallet_of(row)
+    return wallet[:10] + "…" if wallet else "Anonymous trader"
+
+
+def market_is_active(pos):
+    if pos.get("archived") is True:
+        return False
+    raw = pos.get("end_date") or pos.get("endDate") or pos.get("end_date_iso")
+    if raw:
+        try:
+            end_day = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+            return end_day >= datetime.now(timezone.utc).date()
+        except ValueError:
+            try:
+                return date.fromisoformat(str(raw)[:10]) >= datetime.now(timezone.utc).date()
+            except ValueError:
+                pass
+    return True
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def fetch_kalshi_events(max_pages=10):
+    events, cursor = [], None
+    for _ in range(max_pages):
+        params = {"status": "open", "limit": 200, "with_nested_markets": "true"}
+        if cursor:
+            params["cursor"] = cursor
+        payload, _, _ = get_json(f"{KALSHI_BASE}/events", params)
+        events.extend(payload.get("events", []) or [])
+        cursor = payload.get("cursor")
+        if not cursor:
+            break
+    return events
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_leaderboard(period, category, sort_by, limit):
+    params = {"time_period": period.lower(), "category": category.lower(), "sort_by": sort_by.upper(), "limit": int(limit)}
+    payload, status, trace = get_json(f"{POLY_BASE}/v2/leaderboard", params)
+    rows = data_rows(payload)
+    if not rows and isinstance(payload, dict) and isinstance(payload.get("leaderboard"), list):
+        rows = payload["leaderboard"]
+    return rows, payload.get("pagination", {}) if isinstance(payload, dict) else {}, status, trace
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def fetch_wallet_endpoint(path, wallet, params=None, ttl_marker=""):
+    query = {"user": wallet}
+    if params:
+        query.update(params)
+    payload, status, trace = get_json(f"{POLY_BASE}{path}", query)
+    return payload, status, trace
+
+
+def fetch_wallet_bundle(wallet):
+    results = {}
+    calls = {
+        "stats": ("/v2/user-stats", {}),
+        "value": ("/v2/value", {}),
+        "open": ("/v2/positions", {"status": "OPEN", "limit": 100, "sort_by": "CURRENT_VALUE", "sort_direction": "DESC", "include_archived": "true", "filter_amount": 0}),
+        "closed": ("/v2/positions", {"status": "CLOSED", "limit": 100, "sort_by": "REALIZED_PNL", "sort_direction": "DESC"}),
+        "combos": ("/v2/positions/combos", {"status": "OPEN", "limit": 100}),
+        "activity": ("/v2/activity", {"limit": 100, "sort_by": "TIMESTAMP", "sort_direction": "DESC"}),
+        "pnl": ("/v2/user-pnl", {"interval": "max", "fidelity": "1d"}),
+        "volume": ("/v2/user-volume", {}),
+    }
+    for name, (path, params) in calls.items():
+        try:
+            payload, status, trace = fetch_wallet_endpoint(path, wallet, params)
+            results[name] = {"payload": payload, "status": status, "trace": trace, "error": None}
+        except Exception as exc:
+            results[name] = {"payload": {}, "status": None, "trace": None, "error": str(exc)}
+    return results
+
+
+def get_data(payload):
+    return payload.get("data") if isinstance(payload, dict) else None
+
+
+def get_list(payload):
+    return data_rows(payload)
+
+
+def group_positions(positions):
+    groups = {}
+    for pos in positions:
+        condition = str(pos.get("condition_id") or pos.get("conditionId") or pos.get("slug") or pos.get("title") or "unknown")
+        group = groups.setdefault(condition, {"condition": condition, "title": pos.get("title") or pos.get("name") or "Untitled market", "positions": [], "yes_shares": 0.0, "no_shares": 0.0, "yes_cost": 0.0, "no_cost": 0.0, "yes_value": 0.0, "no_value": 0.0, "yes_pnl": 0.0, "no_pnl": 0.0, "archived": False, "end_date": pos.get("end_date"), "active": True})
+        group["positions"].append(pos)
+        outcome = norm(pos.get("outcome"))
+        shares = number(pos.get("current_size"))
+        cost = number(pos.get("total_cost_usdc", pos.get("entry_cost_usdc")))
+        value = number(pos.get("current_value"))
+        pnl = number(pos.get("unrealized_pnl", pos.get("total_pnl")))
+        if outcome == "yes":
+            group["yes_shares"] += shares
+            group["yes_cost"] += cost
+            group["yes_value"] += value
+            group["yes_pnl"] += pnl
+        elif outcome == "no":
+            group["no_shares"] += shares
+            group["no_cost"] += cost
+            group["no_value"] += value
+            group["no_pnl"] += pnl
+        group["archived"] = group["archived"] or bool(pos.get("archived"))
+        group["active"] = group["active"] and market_is_active(pos)
+        if pos.get("end_date"):
+            group["end_date"] = pos.get("end_date")
+    for group in groups.values():
+        group["total_cost"] = group["yes_cost"] + group["no_cost"]
+        group["total_value"] = group["yes_value"] + group["no_value"]
+        group["total_pnl"] = group["yes_pnl"] + group["no_pnl"]
+        group["net_yes_shares"] = group["yes_shares"] - group["no_shares"]
+        group["has_both_sides"] = group["yes_shares"] > 0 and group["no_shares"] > 0
+        group["position_count"] = len(group["positions"])
+    return list(groups.values())
+
+
+def render_group(group):
+    with st.container(border=True):
+        label = "ACTIVE MARKET" if group["active"] else "ARCHIVED / ENDED MARKET"
+        st.markdown(f"**{group['title']}**")
+        st.caption(f"{label} · {group['position_count']} token position(s) · End date: {group['end_date'] or 'not supplied'}")
+        if group["has_both_sides"]:
+            st.warning("OPPOSITE-SIDE HOLDING: both YES and NO are held in this same condition.")
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("YES shares", f"{group['yes_shares']:,.4f}")
+        a2.metric("NO shares", f"{group['no_shares']:,.4f}")
+        a3.metric("Net direction", f"{'YES' if group['net_yes_shares'] > 0 else 'NO' if group['net_yes_shares'] < 0 else 'Neutral'} · {abs(group['net_yes_shares']):,.4f}")
+        a4.metric("Combined P&L", money(group["total_pnl"]))
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Combined cost", money(group["total_cost"]))
+        b2.metric("Combined value", money(group["total_value"]))
+        b3.metric("Combined return", f"{(group['total_pnl'] / group['total_cost'] * 100):.2f}%" if group["total_cost"] else "—")
+        for pos in group["positions"]:
+            st.caption(f"{str(pos.get('outcome', 'Unknown')).upper()}: {number(pos.get('current_size')):,.4f} shares · Entry {number(pos.get('avg_price')):.4f} · Current {number(pos.get('current_price')):.4f} · P&L {money(pos.get('unrealized_pnl'))} · Archived={bool(pos.get('archived'))}")
+        st.caption(f"Condition ID: {group['condition']}")
+
+st.title("📊 Polymarket → Kalshi Trading Assistant")
+st.caption("Version 9 · Trader Strategy Analyzer · Public data · Read-only · Manual approval only · No automatic trading")
+
+with st.sidebar:
+    st.subheader("Research settings")
+    bankroll = st.number_input("Simulated bankroll ($)", min_value=1.0, max_value=100000.0, value=55.0, step=5.0)
+    st.caption("Planning value only. No Kalshi account connection or order placement.")
+
+market_tab, trader_tab, wallet_tab, calculator_tab = st.tabs(["Economic Markets", "Trader Leaderboard", "Wallet Inspector", "Payoff Calculator"])
+
+with market_tab:
+    st.subheader("Open Kalshi economic markets")
+    left, right = st.columns([1, 2])
+    with left:
+        selected_topic = st.selectbox("Economic category", ["All economic topics"] + list(TOPICS.keys()))
+    with right:
+        keyword = st.text_input("Optional keyword", placeholder="e.g. Fed, CPI, Powell, GDP")
+    if st.button("Search Kalshi markets", type="primary", key="search_markets"):
+        st.session_state["run_market_search"] = True
+    if st.session_state.get("run_market_search"):
+        try:
+            with st.spinner("Loading Kalshi events and nested markets..."):
+                events = fetch_kalshi_events()
+            matches = []
+            for event in events:
+                for market in event.get("markets", []) or []:
+                    searchable = " ".join([event.get("title", ""), event.get("subtitle", ""), event.get("category", ""), market.get("title", ""), market.get("subtitle", "")])
+                    found = topics_for(searchable)
+                    if selected_topic != "All economic topics" and selected_topic not in found:
+                        continue
+                    if selected_topic == "All economic topics" and not found:
+                        continue
+                    if keyword and not phrase_in(searchable, keyword):
+                        tokens = set(re.findall(r"[a-z0-9]+", norm(searchable)))
+                        if norm(keyword) not in tokens:
+                            continue
+                    matches.append((event, market, found))
+            st.success(f"Retrieved {len(events):,} events · Found {len(matches):,} matching markets")
+            if not matches:
+                st.info("No matching markets found. Try a broader category or shorter keyword.")
+            for event, market, found in matches[:60]:
+                with st.container(border=True):
+                    st.markdown(f"**{market.get('title') or event.get('title') or 'Untitled market'}**")
+                    st.caption(f"{event.get('title', '')} · {' / '.join(found)}")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("YES ask", market.get("yes_ask_dollars") or (f"{market.get('yes_ask')}¢" if market.get("yes_ask") is not None else "—"))
+                    c2.metric("NO ask", market.get("no_ask_dollars") or (f"{market.get('no_ask')}¢" if market.get("no_ask") is not None else "—"))
+                    c3.metric("Ticker", market.get("ticker", "—"))
+                    if market.get("close_time"):
+                        st.caption(f"Closes: {market.get('close_time')}")
+                    if market.get("rules_primary"):
+                        with st.expander("Settlement rules"):
+                            st.write(market.get("rules_primary"))
+        except Exception as exc:
+            st.error(f"Kalshi market search failed: {exc}")
+
+with trader_tab:
+    st.subheader("Find traders by reported Polymarket performance")
+    st.warning("Leaderboard P&L is a ranking signal, not proof of repeatable edge. Volume is reported in shares, not dollars.")
+    a, b, c, d = st.columns(4)
+    with a:
+        period = st.selectbox("Performance window", ["ALL", "MONTH", "WEEK", "DAY"])
+    with b:
+        category = st.selectbox("Category", ["OVERALL", "ECONOMICS", "FINANCE", "CRYPTO", "POLITICS", "SPORTS", "TECH", "WEATHER", "CULTURE", "MENTIONS"])
+    with c:
+        rank_by = st.selectbox("Rank by", ["PNL", "VOLUME"])
+    with d:
+        row_limit = st.selectbox("Rows", [10, 25, 50], index=1)
+    if st.button("Load Polymarket leaderboard", type="primary", key="load_leaderboard"):
+        st.session_state["run_leaderboard"] = True
+    if st.session_state.get("run_leaderboard"):
+        try:
+            with st.spinner("Loading leaderboard..."):
+                leaders, pagination, status, trace = fetch_leaderboard(period, category, rank_by, row_limit)
+            st.caption(f"HTTP {status} · {len(leaders)} entries · {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+            for row in leaders:
+                wallet = wallet_of(row)
+                with st.container(border=True):
+                    lcol, rcol = st.columns([3, 2])
+                    lcol.markdown(f"**#{row.get('rank', '—')} · {display_leader(row)}**")
+                    lcol.caption(wallet or "Wallet not supplied")
+                    rcol.metric("P&L", money(row.get("pnl", row.get("profit"))))
+                    rcol.metric("Volume (shares)", f"{number(row.get('volume', row.get('vol'))):,.0f}")
+                    if wallet and st.button("Inspect this wallet", key=f"inspect_{wallet}"):
+                        st.session_state["selected_wallet"] = wallet
+                        st.session_state["selected_wallet_name"] = display_leader(row)
+                        st.session_state["wallet_to_analyze"] = wallet
+                        st.info("Wallet selected. Open Wallet Inspector.")
+            if pagination.get("has_more"):
+                st.caption("More leaderboard entries may be available through cursor pagination.")
+            if trace:
+                st.caption(f"Trace ID: {trace}")
+        except Exception as exc:
+            st.error(f"Leaderboard request failed: {exc}")
+
+with wallet_tab:
+    st.subheader("Trader Strategy Analyzer")
+    st.caption("Groups YES/NO tokens by market condition, detects opposite-side holdings, and separates archived markets from currently active markets.")
+    default_wallet = st.session_state.get("selected_wallet", "0x56687bf447db6ffa42ffe2204a05edaa20f55839")
+    default_name = st.session_state.get("selected_wallet_name", "Theo4")
+    st.write(f"Selected research target: **{default_name}**")
+    wallet_input = st.text_input("Polymarket proxy wallet", value=default_wallet, placeholder="0x…")
+    if st.button("Analyze wallet", type="primary", key="analyze_wallet"):
+        st.session_state["wallet_to_analyze"] = wallet_input.strip()
+    target = st.session_state.get("wallet_to_analyze", default_wallet)
+    if target:
+        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", target):
+            st.error("Enter a valid 42-character proxy wallet address beginning with 0x.")
+        else:
+            if st.button("Refresh wallet data", key="refresh_wallet"):
+                fetch_wallet_endpoint.clear()
+            try:
+                with st.spinner("Loading wallet profile, holdings, combos, and diagnostics..."):
+                    bundle = fetch_wallet_bundle(target)
+                payloads = {k: v["payload"] for k, v in bundle.items()}
+                stats = get_data(payloads["stats"]) or {}
+                value_data = get_data(payloads["value"]) or {}
+                open_positions = get_list(payloads["open"])
+                closed_positions = get_list(payloads["closed"])
+                combo_positions = get_list(payloads["combos"])
+                activity = get_list(payloads["activity"])
+                volume_data = get_data(payloads["volume"]) or {}
+                pnl_data = get_data(payloads["pnl"])
+                groups = group_positions(open_positions)
+                active_groups = [g for g in groups if g["active"]]
+                archived_groups = [g for g in groups if not g["active"]]
+                both_sides = [g for g in groups if g["has_both_sides"]]
+
+                v1, v2, v3, v4 = st.columns(4)
+                v1.metric("Portfolio value", money(value_data.get("value")))
+                v2.metric("Open token positions", f"{len(open_positions):,}")
+                v3.metric("Distinct markets", f"{len(groups):,}")
+                v4.metric("Markets with YES + NO", f"{len(both_sides):,}")
+                st.caption(f"Proxy wallet returned by value endpoint: {value_data.get('proxy_wallet', 'not supplied')}")
+
+                if stats:
+                    all_time = stats.get("all_time_pnl") or {}
+                    realized = all_time.get("realized_pnl")
+                    if realized is None:
+                        realized = number(all_time.get("realized_market_pnl")) + number(all_time.get("realized_combo_pnl"))
+                    s1, s2, s3 = st.columns(3)
+                    s1.metric("All-time realized P&L", money(realized))
+                    s2.metric("Markets traded", f"{int(number(stats.get('trades'))):,}")
+                    s3.metric("Lifetime volume", money(volume_data.get("volume_usdc")))
+
+                st.markdown("### Strategy overview")
+                st.write(f"**Active-market groups:** {len(active_groups)} · **Archived/ended groups:** {len(archived_groups)} · **Opposite-side groups:** {len(both_sides)} · **Combo positions:** {len(combo_positions)}")
+                if both_sides:
+                    st.warning("This trader holds YES and NO on at least one identical market. Do not copy one side in isolation without understanding the combined exposure.")
+
 
                 st.markdown("#### Active-market holdings — candidates for further review")
                 if active_groups:
@@ -255,3 +479,5 @@ checks = [
 ]
 for idx, item in enumerate(checks):
     st.checkbox(item, key=f"approval_check_{idx}")
+
+st.caption("Data sources: Polymarket public Data API and Kalshi public Trade API. Informational research only; no guaranteed signals, account connection, or automatic trading.")
