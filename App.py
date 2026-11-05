@@ -232,7 +232,6 @@ def group_positions(positions):
     return list(groups.values())
 
 
-
 def classify_market(title):
     text = norm(title)
     found = topics_for(title)
@@ -273,7 +272,6 @@ def analyze_wallet_strategy(open_positions, closed_positions, activity, pnl_hist
 
     market_rows = []
     scenario_rows = []
-    copy_review_rows = []
     one_sided = []
     multi_outcome = []
     expensive_two_sided = []
@@ -286,19 +284,6 @@ def analyze_wallet_strategy(open_positions, closed_positions, activity, pnl_hist
             payout = outcome["shares"]
             net = payout - cost
             scenarios.append(net)
-            avg_entry = (outcome["cost"] / outcome["shares"]) if outcome["shares"] else None
-            implied_current = (outcome["value"] / outcome["shares"]) if outcome["shares"] else None
-            copy_review_rows.append({
-                "Market": group["title"], "Outcome": outcome["label"],
-                "Market structure": "Multiple outcomes held" if len(outcomes) > 1 else "One outcome represented",
-                "Outcome entry cost": outcome["cost"],
-                "Share of wallet active cost %": (outcome["cost"] / total_cost * 100) if total_cost else 0,
-                "Avg. entry price": avg_entry,
-                "Implied current price": implied_current,
-                "Price move since entry": (implied_current - avg_entry) if avg_entry is not None and implied_current is not None else None,
-                "Unrealized P&L": outcome["pnl"],
-                "Review note": "Check whether the price has already moved and verify the trader still holds this outcome",
-            })
             scenario_rows.append({
                 "Market": group["title"], "If this outcome wins": outcome["label"],
                 "Approx. payout": payout, "Net vs. total cost": net,
@@ -329,7 +314,6 @@ def analyze_wallet_strategy(open_positions, closed_positions, activity, pnl_hist
 
     market_rows.sort(key=lambda x: x["Cost"], reverse=True)
     scenario_rows.sort(key=lambda x: x["Net vs. total cost"])
-    copy_review_rows.sort(key=lambda x: x["Outcome entry cost"], reverse=True)
     largest_market = max(active_groups, key=lambda g: g["total_cost"], default=None)
     largest_exposure_pct = (largest_market["total_cost"] / total_cost * 100) if largest_market and total_cost else 0.0
 
@@ -367,9 +351,6 @@ def analyze_wallet_strategy(open_positions, closed_positions, activity, pnl_hist
         warnings.append("The activity response reached 100 rows; behavioral analysis may be based on a partial sample.")
 
     observations = []
-    if category_totals:
-        leading_category = max(category_totals.items(), key=lambda kv: kv[1]["cost"])
-        observations.append(f"Largest category by active entry cost is {leading_category[0]} ({money(leading_category[1]['cost'])}, {leading_category[1]['cost'] / total_cost * 100:.1f}% of active cost).")
     if active_groups:
         observations.append(f"The wallet has {len(active_groups)} active-market groups with approximately {money(total_cost)} in reported entry cost.")
     if one_sided:
@@ -386,8 +367,7 @@ def analyze_wallet_strategy(open_positions, closed_positions, activity, pnl_hist
         "total_active_cost": total_cost, "total_active_value": total_value,
         "total_active_unrealized_pnl": total_unrealized, "all_open_cost": all_open_cost,
         "category_totals": category_totals, "market_rows": market_rows,
-        "scenario_rows": scenario_rows, "copy_review_rows": copy_review_rows,
-        "one_sided_groups": one_sided,
+        "scenario_rows": scenario_rows, "one_sided_groups": one_sided,
         "multi_outcome_groups": multi_outcome, "negative_all_held_scenarios": expensive_two_sided,
         "largest_market": largest_market, "largest_exposure_pct": largest_exposure_pct,
         "closed_realized_sample": closed_realized, "reported_realized": reported_realized,
@@ -428,12 +408,6 @@ def render_wallet_intelligence(analysis):
         df = pd.DataFrame(analysis["market_rows"][:20])
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    if analysis["copy_review_rows"]:
-        st.markdown("#### Potential copy-trade review queue")
-        st.caption("This is a research queue, not a buy signal. It ranks observed positions by the capital RN1 (or any selected wallet) has committed; it does not establish that the price remains attractive or that the trader still holds the position.")
-        import pandas as pd
-        st.dataframe(pd.DataFrame(analysis["copy_review_rows"][:30]), use_container_width=True, hide_index=True)
-
     if analysis["scenario_rows"]:
         with st.expander("Settlement scenarios for held outcomes"):
             import pandas as pd
@@ -454,6 +428,7 @@ def render_wallet_intelligence(analysis):
             st.caption("These totals may differ because the closed-position endpoint may be paginated and the all-time statistic may include combo results.")
         for warning in analysis["warnings"]:
             st.warning(warning)
+
 
 def render_group(group):
     with st.container(border=True):
@@ -493,7 +468,7 @@ def render_group(group):
 
 
 st.title("📊 Polymarket → Kalshi Trading Assistant")
-st.caption("Version 11 · Universal Wallet Intelligence · Public data · Read-only · Manual approval only · No automatic trading")
+st.caption("Version 12 · Wallet Intelligence · Public data · Read-only · Manual approval only · No automatic trading")
 
 with st.sidebar:
     st.subheader("Research settings")
@@ -590,8 +565,8 @@ with trader_tab:
 with wallet_tab:
     st.subheader("Trader Strategy Analyzer")
     st.caption("Aggregates all outcome tokens by market, distinguishes binary YES/NO from named outcomes such as teams, players, OVER and UNDER, and separates archived/ended markets from active markets.")
-    default_wallet = st.session_state.get("selected_wallet", "0x56687bf447db6ffa42ffe2204a05edaa20f55839")
-    default_name = st.session_state.get("selected_wallet_name", "Theo4")
+    default_wallet = st.session_state.get("selected_wallet", "")
+    default_name = st.session_state.get("selected_wallet_name", "No trader selected")
     st.write(f"Selected research target: **{default_name}**")
     wallet_input = st.text_input("Polymarket proxy wallet", value=default_wallet, placeholder="0x…")
     if st.button("Analyze wallet", type="primary", key="analyze_wallet"):
